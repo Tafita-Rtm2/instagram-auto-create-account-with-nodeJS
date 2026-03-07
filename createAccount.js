@@ -271,49 +271,80 @@ app.get('/', (req, res) => {
   <title>Captcha</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:Arial;background:#f0f2f5}
-    .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:14px;text-align:center;font-size:17px;font-weight:bold}
-    .container{max-width:460px;margin:0 auto;padding:12px}
-    .card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
-    .screenshot{width:100%;border-radius:10px;border:2px solid #e1306c}
-    .btn{width:100%;padding:14px;background:linear-gradient(135deg,#0095f6,#0074cc);color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:bold;cursor:pointer;margin-top:10px}
-    p{font-size:14px;color:#444;margin:6px 0;text-align:center}
+    body{font-family:Arial;background:#111;color:#fff}
+    .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:12px;text-align:center;font-size:16px;font-weight:bold}
+    .info{text-align:center;padding:8px 12px;font-size:13px;color:#ccc;background:#222}
+    .wrap{position:relative;width:100%;max-width:540px;margin:0 auto;touch-action:none}
+    #liveImg{width:100%;display:block;cursor:crosshair}
+    #clickFlash{position:absolute;width:28px;height:28px;border-radius:50%;background:rgba(255,80,80,0.7);border:3px solid #fff;pointer-events:none;display:none;transform:translate(-50%,-50%)}
+    .btns{display:flex;gap:8px;padding:8px;background:#222;max-width:540px;margin:0 auto}
+    .btn{flex:1;padding:12px 4px;border:none;border-radius:10px;font-size:13px;font-weight:bold;cursor:pointer;color:#fff}
+    .btn-next{background:linear-gradient(135deg,#fd7e14,#e55a00)}
+    .btn-ok{background:linear-gradient(135deg,#28a745,#1a7a30)}
+    #msg{text-align:center;padding:6px;font-size:13px;color:#ffcc00;min-height:20px;background:#1a1a1a}
   </style>
 </head>
 <body>
-  <div class="header">🤖 Captcha détecté !</div>
-  <div class="container">
-    <div class="card">
-      <p>⚠️ Instagram demande une vérification.</p>
-      <p>Le captcha est visible dans le screenshot ci-dessous.<br>
-      <b>Coche "I'm not a robot"</b> si tu vois l'option, puis clique le bouton.</p>
-    </div>
-    <div class="card">
-      <img id="liveImg" class="screenshot" src="/screenshot?t=0">
-      <div id="statusMsg" style="text-align:center;padding:8px;font-size:14px;color:#666;min-height:20px;margin:6px 0"></div>
-      <button class="btn" style="background:linear-gradient(135deg,#6f42c1,#563d7c)" onclick="clickCb()">🖱️ 1. Cliquer la checkbox reCAPTCHA</button>
-      <button class="btn" style="background:linear-gradient(135deg,#fd7e14,#e55a00);margin-top:8px" onclick="clickNext()">▶️ 2. Cliquer "Next" du captcha</button>
-      <button class="btn" style="margin-top:8px" onclick="done()">✅ 3. Captcha résolu — Continuer</button>
-    </div>
+  <div class="header">🤖 Captcha — Clique directement sur l'écran !</div>
+  <div class="info">👆 Touche l'écran pour cliquer dans le navigateur • Se rafraîchit auto</div>
+  <div id="msg">Clique la checkbox "I'm not a robot" dans l'image</div>
+  <div class="wrap" id="wrap">
+    <img id="liveImg" src="/screenshot?t=0" alt="Instagram">
+    <div id="clickFlash"></div>
+  </div>
+  <div class="btns">
+    <button class="btn btn-next" onclick="clickNext()">▶️ Cliquer Next</button>
+    <button class="btn btn-ok" onclick="done()">✅ Compte créé !</button>
   </div>
   <script>
-    setInterval(() => { document.getElementById('liveImg').src = '/screenshot?t=' + Date.now(); }, 2000);
-    const st = document.getElementById('statusMsg');
-    async function clickCb() {
-      st.textContent = '⏳ Clic checkbox...';
-      const r = await fetch('/captcha-click', {method:'POST'});
-      const d = await r.json();
-      st.textContent = d.msg || (d.ok ? '✅ Checkbox cliquée !' : '❌ Echec');
-    }
+    const BROWSER_W = 1280, BROWSER_H = 900;
+    const msg = document.getElementById('msg');
+    const flash = document.getElementById('clickFlash');
+    let refreshing = true;
+    const refreshLoop = setInterval(() => {
+      if (!refreshing) return;
+      document.getElementById('liveImg').src = '/screenshot?t=' + Date.now();
+    }, 1500);
+
+    document.getElementById('liveImg').addEventListener('click', async function(e) {
+      // Calculer les coordonnées dans le navigateur headless
+      const rect = this.getBoundingClientRect();
+      const scaleX = BROWSER_W / rect.width;
+      const scaleY = BROWSER_H / rect.height;
+      const bx = Math.round((e.clientX - rect.left) * scaleX);
+      const by = Math.round((e.clientY - rect.top)  * scaleY);
+
+      // Afficher le flash rouge à l'endroit du clic
+      flash.style.left = (e.clientX - rect.left) + 'px';
+      flash.style.top  = (e.clientY - rect.top)  + 'px';
+      flash.style.display = 'block';
+      setTimeout(() => { flash.style.display = 'none'; }, 600);
+
+      msg.textContent = '⏳ Clic envoyé (' + bx + ',' + by + ')...';
+      refreshing = false;
+
+      try {
+        const r = await fetch('/remote-click', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({x: bx, y: by})
+        });
+        const d = await r.json();
+        msg.textContent = d.msg || '✅ Clic transmis !';
+      } catch(e) {
+        msg.textContent = '❌ Erreur réseau';
+      }
+      setTimeout(() => { refreshing = true; }, 1200);
+    });
+
     async function clickNext() {
-      st.textContent = '⏳ Clic Next...';
+      msg.textContent = '⏳ Clic Next...';
       const r = await fetch('/captcha-next', {method:'POST'});
       const d = await r.json();
-      st.textContent = d.msg || (d.ok ? '✅ Next cliqué !' : '❌ Echec');
-      if (d.msg && d.msg.includes('créé')) setTimeout(() => location.href = '/', 2000);
+      msg.textContent = d.msg || '✅';
+      if (d.status === 'waiting_code') setTimeout(() => location.href = '/', 1500);
     }
     async function done() {
-      st.textContent = '⏳ Finalisation...';
       await fetch('/captcha-done', {method:'POST'});
       location.href = '/';
     }
@@ -764,6 +795,67 @@ app.post('/do-submit', async (req, res) => {
     }
 });
 
+// Route remote-click — transmet un clic de l'utilisateur au navigateur headless
+app.post('/remote-click', async (req, res) => {
+    try {
+        if (!browserRef) return res.json({ ok:false, msg:'Browser non dispo' });
+        const { x, y } = req.body;
+        if (typeof x !== 'number' || typeof y !== 'number')
+            return res.json({ ok:false, msg:'Coordonnées invalides' });
+
+        console.log(`   🖱️ Remote clic (${x},${y})`);
+
+        // Essayer d'abord de switcher dans un iframe reCAPTCHA si présent
+        let usedIframe = false;
+        try {
+            const iframes = await browserRef.findElements(By.tagName('iframe'));
+            for (let iframe of iframes) {
+                const src = (await iframe.getAttribute('src') || '');
+                if (src.includes('recaptcha') || src.includes('anchor')) {
+                    const iRect = await browserRef.executeScript(
+                        "var r=arguments[0].getBoundingClientRect(); return {x:r.left,y:r.top,w:r.width,h:r.height};", iframe
+                    );
+                    // Si le clic est dans l'iframe
+                    if (x >= iRect.x && x <= iRect.x+iRect.w && y >= iRect.y && y <= iRect.y+iRect.h) {
+                        await browserRef.switchTo().frame(iframe);
+                        const lx = Math.round(x - iRect.x);
+                        const ly = Math.round(y - iRect.y);
+                        await browserRef.actions().move({x: lx, y: ly}).press().release().perform();
+                        await browserRef.switchTo().defaultContent();
+                        usedIframe = true;
+                        console.log(`   ✅ Clic dans iframe reCAPTCHA (${lx},${ly})`);
+                        break;
+                    }
+                }
+            }
+        } catch(e) {
+            try { await browserRef.switchTo().defaultContent(); } catch(_) {}
+        }
+
+        if (!usedIframe) {
+            // Clic direct aux coordonnées dans la page principale
+            await browserRef.actions().move({x, y}).press().release().perform();
+            console.log(`   ✅ Clic page principale (${x},${y})`);
+        }
+
+        await sleep(800);
+        state.screenshot = await browserRef.takeScreenshot();
+
+        // Vérifier si page changée après le clic
+        const url = await browserRef.getCurrentUrl();
+        if (!url.includes('emailsignup')) {
+            state.status = 'waiting_code';
+            return res.json({ ok:true, msg:'✅ Page changée — code en attente !', status:'waiting_code' });
+        }
+
+        res.json({ ok:true, msg:`✅ Clic (${x},${y}) transmis` });
+    } catch(e) {
+        console.error("❌ remote-click : " + e.message);
+        try { await browserRef.switchTo().defaultContent(); } catch(_) {}
+        res.json({ ok:false, msg:'❌ ' + e.message });
+    }
+});
+
 // Route captcha-click — clic checkbox reCAPTCHA dans l'iframe
 app.post('/captcha-click', async (req, res) => {
     try {
@@ -947,9 +1039,25 @@ async function getFreeProxy() {
     const service = new chrome.ServiceBuilder(driverPath);
     const opts = new chrome.Options();
     opts.setChromeBinaryPath(chromePath);
+    // User-Agent aléatoire parmi plusieurs profils Chrome réels
+    const USER_AGENTS = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+    ];
+    const chosenUA = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+    console.log(`🖥️ User-Agent : ${chosenUA.substring(0, 60)}...`);
+
     opts.addArguments('--headless=new','--no-sandbox','--disable-dev-shm-usage',
         '--window-size=1280,900','--disable-blink-features=AutomationControlled','--lang=en-US,en');
-    opts.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    opts.addArguments(`--user-agent=${chosenUA}`);
+    // Cache/cookies vierges à chaque démarrage (profil temporaire unique)
+    const tmpProfile = `/tmp/chrome-profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    opts.addArguments(`--user-data-dir=${tmpProfile}`);
     opts.setUserPreferences({'intl.accept_languages':'en-US,en'});
 
     let browser = await new Builder().forBrowser('chrome').setChromeOptions(opts).setChromeService(service).build();
