@@ -54,6 +54,7 @@ let state = {
     confirmCode: ''
 };
 let browserRef = null;
+let liveLoopPaused = false;
 
 // ─── SERVEUR EXPRESS ──────────────────────────────────────────────────────────
 const app = express();
@@ -438,6 +439,7 @@ app.get('/screenshot', (req, res) => {
 // ✅ Injection date via clic sur les vrais dropdowns React Instagram
 // ✅ Injection date via clic Selenium sur les vrais composants React
 app.post('/inject-date-and-submit', async (req, res) => {
+    liveLoopPaused = true; // Pause screenshot pendant les actions critiques
     const { month, day, year } = req.body;
     const monthNum = parseInt(month);
     const dayNum   = parseInt(day);
@@ -453,32 +455,23 @@ app.post('/inject-date-and-submit', async (req, res) => {
     try {
         if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
 
-        // D'abord inspecter les vrais éléments Birthday dans le DOM
+        // Inspecter les dropdowns Birthday dans le DOM
         const domInfo = await browserRef.executeScript(`
-            // Chercher par aria-label ou role="combobox" ou role="listbox"
-            var combos = Array.from(document.querySelectorAll('[role="combobox"],[role="listbox"],[aria-label*="Month"],[aria-label*="Day"],[aria-label*="Year"],[aria-label*="Mois"],[aria-label*="Jour"],[aria-label*="Année"]'));
-            // Chercher le label Birthday et ses éléments enfants
-            var labels = Array.from(document.querySelectorAll('label,span,div')).filter(function(el){
-                return el.textContent.trim() === 'Birthday' || el.textContent.trim() === 'Anniversaire';
-            });
-            // Chercher tous les éléments avec tabindex dans la zone Birthday
+            var combos = Array.from(document.querySelectorAll('[role="combobox"],[aria-label*="Month"],[aria-label*="Day"],[aria-label*="Year"],[aria-label*="Mois"],[aria-label*="Jour"],[aria-label*="Année"]'));
             var tabEls = Array.from(document.querySelectorAll('[tabindex]')).filter(function(el){
                 return el.tagName !== 'INPUT' && el.tagName !== 'BUTTON' && el.tagName !== 'SELECT' && el.tagName !== 'A';
             }).map(function(el){
                 var r = el.getBoundingClientRect();
-                return { tag:el.tagName, aria:el.getAttribute('aria-label'), role:el.getAttribute('role'), x:Math.round(r.x), y:Math.round(r.y), w:Math.round(r.width), h:Math.round(r.height), text:el.textContent.trim().substring(0,30) };
+                return { aria:el.getAttribute('aria-label'), role:el.getAttribute('role'), x:Math.round(r.x), y:Math.round(r.y), w:Math.round(r.width), h:Math.round(r.height) };
             }).filter(function(el){ return el.w > 50 && el.h > 20 && el.y > 100 && el.y < 600; });
-
             return {
                 combos: combos.map(function(el){
                     var r = el.getBoundingClientRect();
-                    return { aria:el.getAttribute('aria-label'), role:el.getAttribute('role'), x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2), text:el.textContent.trim().substring(0,20) };
+                    return { aria:el.getAttribute('aria-label'), role:el.getAttribute('role'), x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2) };
                 }),
                 tabEls: tabEls
             };
         `);
-        console.log(`   Combos : ${JSON.stringify(domInfo.combos)}`);
-        console.log(`   TabEls : ${JSON.stringify(domInfo.tabEls)}`);
 
         // Trouver les dropdowns Month/Day/Year via leur aria-label
         let monthEl = null, dayEl = null, yearEl = null;
@@ -493,7 +486,6 @@ app.post('/inject-date-and-submit', async (req, res) => {
         // Si pas trouvé via aria, utiliser les tabEls positionnés (les 3 dropdowns sont côte à côte)
         if (!monthEl || !dayEl || !yearEl) {
             const tabEls = (domInfo.tabEls || []).filter(el => el.w > 80 && el.h > 30);
-            // Trier par x pour avoir Month (gauche), Day (milieu), Year (droite)
             tabEls.sort((a, b) => a.x - b.x);
             if (tabEls.length >= 3) {
                 if (!monthEl) monthEl = tabEls[0];
@@ -571,105 +563,105 @@ app.post('/inject-date-and-submit', async (req, res) => {
         state.screenshot = await browserRef.takeScreenshot();
 
         // ── SCROLL BAS + CLIC SUBMIT ─────────────────────────────────────────
-        // Scroller tout en bas de la page pour faire apparaître le bouton Submit
         await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-        await sleep(1000);
+        await sleep(800);
         state.screenshot = await browserRef.takeScreenshot();
 
         let submitOk = false;
-        for (let si = 0; si < 6; si++) {
-            // Scroller encore pour s'assurer que le bouton est visible
+        for (let si = 0; si < 3; si++) {
             await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-            await sleep(500);
+            await sleep(400);
 
-            // Trouver le bouton Submit — chercher button ET div[role=button]
-            let submitBtn = null;
-            const allBtnEls2 = await browserRef.findElements(By.css('button, div[role="button"], [role="button"]'));
-            console.log(`   Essai ${si+1} : ${allBtnEls2.length} bouton(s) trouvé(s)`);
-            for (let b of allBtnEls2) {
-                try {
-                    const txt  = (await b.getText()).trim().toLowerCase();
-                    const type = (await b.getAttribute('type') || '').toLowerCase();
-                    if (type === 'submit' || txt === 'submit' || txt === 'next') { submitBtn = b; break; }
-                } catch(e) {}
-            }
-            if (!submitBtn) {
-                for (let b of allBtnEls2) {
-                    try {
-                        const txt  = (await b.getText()).trim();
-                        const rect = await browserRef.executeScript("var r=arguments[0].getBoundingClientRect(); return {w:r.width,h:r.height}", b);
-                        if (rect.w > 100 && rect.h > 30 && !txt.toLowerCase().includes('already')) {
-                            submitBtn = b; break;
-                        }
-                    } catch(e) {}
+            // Méthode 1 : clic JS direct sur le bouton Submit (bypasse la détection Selenium)
+            const submitResult = await browserRef.executeScript(`
+                // Masquer webdriver juste avant le submit
+                try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch(e) {}
+                var btns = Array.from(document.querySelectorAll('[role="button"],button'));
+                var btn = null;
+                for (var b of btns) {
+                    var txt = b.textContent.trim();
+                    if (txt === 'Submit' || txt === 'Next') { btn = b; break; }
                 }
-            }
-
-            if (submitBtn) {
-                // Scroll en bas et récupérer les coordonnées du DIV Submit
-                await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-                await sleep(600);
-
-                const submitCoords = await browserRef.executeScript(`
-                    var btns = Array.from(document.querySelectorAll('[role="button"],button'));
-                    var btn = null;
-                    for (var b of btns) {
-                        var txt = b.textContent.trim();
-                        if (txt === 'Submit' || txt === 'Next') { btn = b; break; }
-                    }
-                    if (!btn) {
-                        var maxArea = 0;
-                        for (var b of btns) {
-                            var r = b.getBoundingClientRect();
-                            var area = r.width * r.height;
-                            if (area > maxArea && r.width > 100 && !b.textContent.includes('already')) { maxArea = area; btn = b; }
-                        }
-                    }
-                    if (!btn) return null;
+                if (!btn) {
+                    // Chercher par type="submit"
+                    btn = document.querySelector('button[type="submit"], input[type="submit"]');
+                }
+                if (btn) {
+                    // Simuler un vrai clic humain
                     var rect = btn.getBoundingClientRect();
-                    return { x: Math.round(rect.left + rect.width/2), y: Math.round(rect.top + rect.height/2), txt: btn.textContent.trim() };
-                `);
+                    var cx = rect.left + rect.width/2;
+                    var cy = rect.top + rect.height/2;
+                    btn.dispatchEvent(new MouseEvent('mouseover', {bubbles:true, clientX:cx, clientY:cy}));
+                    btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:cx, clientY:cy}));
+                    btn.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true, clientX:cx, clientY:cy}));
+                    btn.dispatchEvent(new MouseEvent('click',     {bubbles:true, clientX:cx, clientY:cy}));
+                    // Essayer aussi via le form
+                    var form = btn.closest('form');
+                    if (form) {
+                        try { form.dispatchEvent(new Event('submit', {bubbles:true, cancelable:true})); } catch(e) {}
+                    }
+                    return { ok:true, txt:btn.textContent.trim(), x:Math.round(cx), y:Math.round(cy) };
+                }
+                return { ok:false };
+            `);
+            console.log(`   Essai ${si+1} JS submit: ${JSON.stringify(submitResult)}`);
 
-                if (submitCoords) {
-                    state.screenshot = await browserRef.takeScreenshot();
-                    await browserRef.actions().move({x: submitCoords.x, y: submitCoords.y}).press().release().perform();
-                    console.log(`   ✅ Clic Actions (${submitCoords.x},${submitCoords.y}) sur "${submitCoords.txt}"`);
-                } else {
-                    console.log(`   Essai ${si+1} : coords introuvables`);
+            if (submitResult && submitResult.ok) {
+                // Attendre et vérifier si la page a changé
+                await sleep(3000);
+
+                // Méthode 2 (fallback) : clic Actions Selenium aux coordonnées
+                const url = await browserRef.getCurrentUrl();
+                console.log(`   URL essai ${si+1} : ${url}`);
+                state.screenshot = await browserRef.takeScreenshot();
+
+                if (!url.includes('emailsignup')) {
+                    submitOk = true;
+                    console.log("✅ Page changée — Submit réussi !");
+                    break;
+                }
+                // Vérifier si champ code apparu
+                try {
+                    await browserRef.findElement(By.xpath("//input[@inputmode='numeric' or @name='confirmationCode' or @autocomplete='one-time-code']"));
+                    submitOk = true;
+                    console.log("✅ Champ code apparu !");
+                    break;
+                } catch(e) {}
+
+                // Si JS click n'a pas fonctionné, essayer Selenium Actions
+                if (si < 2) {
+                    await browserRef.actions()
+                        .move({x: submitResult.x, y: submitResult.y})
+                        .pause(200)
+                        .press()
+                        .pause(100)
+                        .release()
+                        .perform();
+                    console.log(`   ✅ Clic Actions (${submitResult.x},${submitResult.y})`);
+                    await sleep(3000);
+                    const url2 = await browserRef.getCurrentUrl();
+                    console.log(`   URL après Actions: ${url2}`);
+                    if (!url2.includes('emailsignup')) { submitOk = true; break; }
                 }
             } else {
-                console.log(`   Essai ${si+1} : aucun element role=button trouvé`);
+                console.log(`   Essai ${si+1} : bouton Submit introuvable`);
+                await sleep(2000);
             }
-
-            await sleep(3000);
-            const url = await browserRef.getCurrentUrl();
-            console.log(`   URL essai ${si+1} : ${url}`);
-            state.screenshot = await browserRef.takeScreenshot();
-
-            if (!url.includes('emailsignup')) {
-                submitOk = true;
-                console.log("✅ Page changée — Submit réussi !");
-                break;
-            }
-            // Vérifier si champ code apparu sur la même page
-            try {
-                await browserRef.findElement(By.xpath("//input[@inputmode='numeric' or @name='confirmationCode' or @autocomplete='one-time-code']"));
-                submitOk = true;
-                console.log("✅ Champ code apparu !");
-                break;
-            } catch(e) {}
         }
 
         if (submitOk) {
             state.status = 'waiting_code';
+            liveLoopPaused = false;
             res.json({ ok:true, msg:'✅ Submit réussi ! En attente du code...' });
         } else {
             // Submit auto échoué → l'utilisateur clique manuellement
             state.status = 'ready_for_submit';
+            liveLoopPaused = false;
             res.json({ ok:true, msg:'⚠️ Clique sur "Soumettre" dans la prochaine page !' });
         }
 
     } catch(e) {
+        liveLoopPaused = false;
         console.error("❌ inject : " + e.message);
         res.json({ ok:false, msg:'❌ ' + e.message });
     }
@@ -677,88 +669,54 @@ app.post('/inject-date-and-submit', async (req, res) => {
 
 // Route /do-submit — clic sur Submit Instagram
 app.post('/do-submit', async (req, res) => {
+    liveLoopPaused = true;
     try {
         if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
 
         // Scroll en bas pour voir le bouton
         await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-        await sleep(800);
-        state.screenshot = await browserRef.takeScreenshot();
-
-        // Debug : lister tous les boutons dans le DOM
-        const btnDebug = await browserRef.executeScript(`
-            return Array.from(document.querySelectorAll('button,div[role="button"],[role="button"]')).map(function(b) {
-                var r = b.getBoundingClientRect();
-                return {
-                    tag: b.tagName,
-                    type: b.getAttribute('type'),
-                    role: b.getAttribute('role'),
-                    txt: b.textContent.trim().substring(0,30),
-                    x: Math.round(r.left + r.width/2),
-                    y: Math.round(r.top + r.height/2),
-                    w: Math.round(r.width),
-                    h: Math.round(r.height),
-                    visible: r.width > 0 && r.height > 0
-                };
-            });
-        `);
-        console.log('   Tous les boutons:', JSON.stringify(btnDebug));
-
-        // Trouver le bouton Submit — chercher parmi TOUS les boutons et div[role=button]
-        let submitBtn = null;
-        const allBtnEls = await browserRef.findElements(By.css('button, div[role="button"], [role="button"]'));
-        for (let b of allBtnEls) {
-            try {
-                const txt = (await b.getText()).trim().toLowerCase();
-                const type = (await b.getAttribute('type') || '').toLowerCase();
-                if (type === 'submit' || txt === 'submit' || txt === 'next') { submitBtn = b; break; }
-            } catch(e) {}
-        }
-        // Fallback : prendre le premier bouton large et visible qui n'est pas "I already have"
-        if (!submitBtn) {
-            for (let b of allBtnEls) {
-                try {
-                    const txt = (await b.getText()).trim();
-                    const rect = await browserRef.executeScript("var r=arguments[0].getBoundingClientRect(); return {w:r.width,h:r.height,y:r.top}", b);
-                    if (rect.w > 100 && rect.h > 30 && !txt.toLowerCase().includes('already')) {
-                        submitBtn = b; break;
-                    }
-                } catch(e) {}
-            }
-        }
-
-        if (!submitBtn) return res.json({ ok:false, msg:'❌ Bouton Submit introuvable. Boutons trouvés: ' + JSON.stringify(btnDebug.slice(0,5)) });
-
-        // Scroll bas et obtenir les coordonnées du bouton Submit
-        await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
         await sleep(600);
 
-        // Trouver le DIV Submit et ses coordonnées absolues dans la page
-        const btnCoords = await browserRef.executeScript(`
+        // Clic JS + stealth sur Submit
+        const submitResult = await browserRef.executeScript(`
+            try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch(e) {}
             var btns = Array.from(document.querySelectorAll('[role="button"],button'));
             var btn = null;
             for (var b of btns) {
-                if (b.textContent.trim() === 'Submit' || b.textContent.trim() === 'Next') { btn = b; break; }
+                var txt = b.textContent.trim();
+                if (txt === 'Submit' || txt === 'Next') { btn = b; break; }
             }
-            if (!btn) return null;
+            if (!btn) btn = document.querySelector('button[type="submit"], input[type="submit"]');
+            if (!btn) {
+                // Prendre le plus grand bouton visible
+                var maxArea = 0;
+                for (var b of btns) {
+                    var r = b.getBoundingClientRect();
+                    if (r.width * r.height > maxArea && r.width > 100 && !b.textContent.includes('already')) {
+                        maxArea = r.width * r.height; btn = b;
+                    }
+                }
+            }
+            if (!btn) return { ok:false, debug: btns.map(function(b){ var r=b.getBoundingClientRect(); return {txt:b.textContent.trim().substring(0,20),w:Math.round(r.width),h:Math.round(r.height)}; }) };
             var rect = btn.getBoundingClientRect();
-            return {
-                x: Math.round(rect.left + rect.width/2),
-                y: Math.round(rect.top + rect.height/2),
-                txt: btn.textContent.trim()
-            };
+            var cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
+            btn.dispatchEvent(new MouseEvent('mouseover', {bubbles:true, clientX:cx, clientY:cy}));
+            btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:cx, clientY:cy}));
+            btn.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true, clientX:cx, clientY:cy}));
+            btn.dispatchEvent(new MouseEvent('click',     {bubbles:true, clientX:cx, clientY:cy}));
+            var form = btn.closest('form');
+            if (form) { try { form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); } catch(e) {} }
+            return { ok:true, txt:btn.textContent.trim(), x:Math.round(cx), y:Math.round(cy) };
         `);
-        console.log(`   Coords Submit : ${JSON.stringify(btnCoords)}`);
+        console.log(`✅ do-submit JS clic: ${JSON.stringify(submitResult)}`);
 
-        if (!btnCoords) return res.json({ ok:false, msg:'❌ Bouton Submit DIV introuvable' });
+        if (!submitResult || !submitResult.ok) {
+            liveLoopPaused = false;
+            return res.json({ ok:false, msg:'❌ Bouton Submit introuvable: ' + JSON.stringify(submitResult?.debug?.slice(0,4)) });
+        }
 
-        // Cliquer via Selenium Actions aux coordonnées absolues (bypasse React)
-        await browserRef.actions().move({x: btnCoords.x, y: btnCoords.y}).press().release().perform();
-        console.log(`✅ do-submit Actions clic (${btnCoords.x},${btnCoords.y})`);
-        const clickResult = btnCoords;
         await sleep(4000);
         state.screenshot = await browserRef.takeScreenshot();
-
         const url = await browserRef.getCurrentUrl();
         console.log(`   URL après clic : ${url}`);
 
@@ -771,16 +729,35 @@ app.post('/do-submit', async (req, res) => {
             } catch(e) {}
         }
 
+        // Si toujours bloqué, essayer Selenium Actions en plus
+        if (!success) {
+            await browserRef.actions()
+                .move({x: submitResult.x, y: submitResult.y})
+                .pause(300)
+                .press()
+                .pause(150)
+                .release()
+                .perform();
+            console.log(`   Actions backup (${submitResult.x},${submitResult.y})`);
+            await sleep(3000);
+            const url2 = await browserRef.getCurrentUrl();
+            console.log(`   URL après Actions: ${url2}`);
+            success = !url2.includes('emailsignup');
+            state.screenshot = await browserRef.takeScreenshot();
+        }
+
         // Détecter si captcha apparu
         const hasCaptcha = await browserRef.executeScript(`
             return !!(document.querySelector('iframe[src*="recaptcha"]') ||
                       document.querySelector('.g-recaptcha') ||
                       document.querySelector('[title*="captcha" i]') ||
                       document.querySelector('iframe[src*="captcha"]') ||
-                      (document.body.textContent.includes('not a robot') || document.body.textContent.includes('confirm it')));
+                      document.body.textContent.includes('not a robot') ||
+                      document.body.textContent.includes('confirm it'));
         `);
         console.log(`   Captcha détecté : ${hasCaptcha}`);
 
+        liveLoopPaused = false;
         if (hasCaptcha) {
             state.status = 'waiting_captcha';
             return res.json({ ok: true, msg: '🤖 Captcha détecté — coche "I am not a robot" dans le screenshot !' });
@@ -790,6 +767,7 @@ app.post('/do-submit', async (req, res) => {
         res.json({ ok: true, msg: success ? '✅ Compte soumis !' : '⚠️ Submit cliqué — vérifie le screenshot' });
 
     } catch(e) {
+        liveLoopPaused = false;
         console.error("❌ do-submit : " + e.message);
         res.json({ ok:false, msg:'❌ ' + e.message });
     }
@@ -1052,22 +1030,42 @@ async function getFreeProxy() {
     const chosenUA = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
     console.log(`🖥️ User-Agent : ${chosenUA.substring(0, 60)}...`);
 
-    opts.addArguments('--headless=new','--no-sandbox','--disable-dev-shm-usage',
-        '--window-size=1280,900','--disable-blink-features=AutomationControlled','--lang=en-US,en');
+    opts.addArguments(
+        '--headless=new','--no-sandbox','--disable-dev-shm-usage',
+        '--window-size=1280,900',
+        '--disable-blink-features=AutomationControlled',
+        '--lang=en-US,en',
+        '--disable-infobars',
+        '--disable-extensions',
+        '--disable-gpu',
+        '--disable-web-security',
+        '--allow-running-insecure-content',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--ignore-certificate-errors',
+        '--disable-popup-blocking',
+        '--disable-notifications',
+    );
     opts.addArguments(`--user-agent=${chosenUA}`);
     // Cache/cookies vierges à chaque démarrage (profil temporaire unique)
     const tmpProfile = `/tmp/chrome-profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     opts.addArguments(`--user-data-dir=${tmpProfile}`);
-    opts.setUserPreferences({'intl.accept_languages':'en-US,en'});
+    opts.setUserPreferences({
+        'intl.accept_languages':'en-US,en',
+        'credentials_enable_service': false,
+        'profile.password_manager_enabled': false,
+    });
+    // Exclure les switches d'automation
+    opts.excludeSwitches(['enable-automation']);
 
     let browser = await new Builder().forBrowser('chrome').setChromeOptions(opts).setChromeService(service).build();
     browserRef = browser;
 
-    // Screenshot en continu toutes les 2s
+    // Screenshot en continu toutes les 3s (pas trop fréquent pour éviter conflits)
     const liveLoop = setInterval(async () => {
+        if (liveLoopPaused) return;
         try { state.screenshot = await browser.takeScreenshot(); }
         catch(e) { clearInterval(liveLoop); }
-    }, 2000);
+    }, 3000);
 
     try {
         // ── 1. SETUP ──────────────────────────────────────────────────────────
@@ -1081,6 +1079,16 @@ async function getFreeProxy() {
 
         // ── 2. OUVRIR INSTAGRAM ───────────────────────────────────────────────
         console.log("🌍 Ouverture Instagram...");
+        // Injecter le stealth script avant le chargement de la page
+        await browser.get("about:blank");
+        await browser.executeScript(`
+            // Masquer navigator.webdriver
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            // Masquer l'automation Chrome
+            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] });
+        `);
         await browser.get("https://www.instagram.com/accounts/emailsignup/");
         await sleep(6000);
 
