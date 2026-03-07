@@ -410,29 +410,59 @@ app.post('/inject-date-and-submit', async (req, res) => {
 
         state.screenshot = await browserRef.takeScreenshot();
 
-        // Submit
-        const submitRes = await browserRef.executeScript(`
-            var btns = Array.from(document.querySelectorAll('button'));
-            var btn = null;
-            for (var i = 0; i < btns.length; i++) {
-                var t = (btns[i].getAttribute('type')||'').toLowerCase();
-                var txt = btns[i].textContent.trim().toLowerCase();
-                if (t === 'submit' || txt === 'submit' || txt === 'next' || txt === 'sign up') { btn = btns[i]; break; }
+        // Scroller vers le bas pour voir le bouton Submit
+        await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
+        await sleep(500);
+
+        // Cliquer Submit — essayer plusieurs fois
+        let submitOk = false;
+        for (let si = 0; si < 5; si++) {
+            const submitRes = await browserRef.executeScript(`
+                var btns = Array.from(document.querySelectorAll('button'));
+                var btn = null;
+                // Chercher en priorité type=submit
+                for (var i = 0; i < btns.length; i++) {
+                    var t = (btns[i].getAttribute('type')||'').toLowerCase();
+                    var txt = btns[i].textContent.trim().toLowerCase();
+                    if (t === 'submit' || txt === 'submit' || txt === 'next' || txt === 'sign up') { btn = btns[i]; break; }
+                }
+                // Fallback : dernier bouton visible
+                if (!btn) {
+                    for (var i = btns.length-1; i >= 0; i--) {
+                        var r = btns[i].getBoundingClientRect();
+                        if (r.width > 50 && r.height > 30) { btn = btns[i]; break; }
+                    }
+                }
+                if (btn) {
+                    btn.removeAttribute('disabled');
+                    btn.scrollIntoView({block:'center',behavior:'instant'});
+                    btn.click();
+                    btn.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+                    return {txt: btn.textContent.trim(), type: btn.getAttribute('type'), disabled: btn.disabled};
+                }
+                return null;
+            `);
+            console.log(`   Submit essai ${si+1} : ${JSON.stringify(submitRes)}`);
+            await sleep(2000);
+            // Vérifier si la page a changé (on n'est plus sur emailsignup)
+            const url = await browserRef.getCurrentUrl();
+            console.log(`   URL après submit : ${url}`);
+            state.screenshot = await browserRef.takeScreenshot();
+            if (!url.includes('emailsignup') && !url.includes('accounts/emailsignup')) {
+                submitOk = true;
+                console.log("✅ Page changée — Submit réussi !");
+                break;
             }
-            if (!btn && btns.length > 0) btn = btns[btns.length-1];
-            if (btn) {
-                btn.removeAttribute('disabled');
-                btn.scrollIntoView({block:'center',behavior:'instant'});
-                btn.click();
-                return btn.textContent.trim();
-            }
-            return null;
-        `);
-        console.log(`   Submit : "${submitRes}"`);
-        await sleep(3000);
-        state.screenshot = await browserRef.takeScreenshot();
+            // Aussi vérifier si un champ de code est apparu
+            const codeField = await browserRef.executeScript(`
+                return !!document.querySelector('input[name="confirmationCode"],input[inputmode="numeric"],input[autocomplete="one-time-code"]');
+            `);
+            if (codeField) { submitOk = true; console.log("✅ Champ code apparu !"); break; }
+        }
+
         state.status = 'waiting_code';
-        res.json({ ok:true, msg:`✅ ${mRes||'?'}/${dRes||'?'}/${yRes||'?'} — Submit !` });
+        state.status = 'waiting_code';
+        res.json({ ok:true, msg: submitOk ? '✅ Date injectée — Compte créé !' : '⚠️ Submit envoyé — vérifie le screenshot' });
 
     } catch(e) {
         console.error("❌ inject : " + e.message);
