@@ -11,7 +11,7 @@ const port = process.env.PORT || 10000;
 app.get('/', (req, res) => {
     if (fs.existsSync('error_screenshot.png')) {
         res.send('<h1>Aperçu du Bot</h1><img src="/debug-image" style="width:100%;max-width:500px;">');
-    } else { res.send('Bot en cours de remplissage...'); }
+    } else { res.send('Bot en cours...'); }
 });
 app.get('/debug-image', (req, res) => { res.sendFile(path.join(process.cwd(), 'error_screenshot.png')); });
 app.listen(port, '0.0.0.0');
@@ -24,13 +24,13 @@ async function getFakeMail() {
         const body = await response.text();
         const $ = cheerio.load(body);
         return $("#email_ch_text").text().trim();
-    } catch (e) { return "alan" + Math.floor(Math.random()*9999) + "@mailhvd.lat"; }
+    } catch (e) { return "alan" + Math.floor(Math.random()*9999) + "@poketani.nl"; }
 }
 
 async function humanType(element, text) {
     for (let char of text) {
         await element.sendKeys(char);
-        await sleep(Math.random() * 60 + 30);
+        await sleep(Math.random() * 50 + 20);
     }
 }
 
@@ -53,27 +53,21 @@ async function humanType(element, text) {
         await sleep(7000);
 
         // --- 1. EMAIL ---
-        console.log("Recherche Email...");
         let emailInput = await browser.wait(until.elementLocated(By.xpath("//input[contains(@name,'emailOrPhone')] | //input[@type='text']")), 15000);
         let mail = await getFakeMail();
-        console.log("Saisie : " + mail);
+        console.log("Saisie Email : " + mail);
         await emailInput.click();
         await humanType(emailInput, mail);
-        
-        // --- 2. TRANSITION (L'ASTUCE DU TAB) ---
-        console.log("Passage au champ suivant...");
-        await emailInput.sendKeys(Key.TAB); // Simule la touche Tabulation
+        await emailInput.sendKeys(Key.TAB);
         await sleep(2000);
 
-        // --- 3. PASSWORD ---
-        console.log("Recherche Password...");
-        // On cherche par name ou par type password
+        // --- 2. PASSWORD ---
+        console.log("Saisie Password...");
         let passInput = await browser.wait(until.elementLocated(By.xpath("//input[@name='password'] | //input[@type='password']")), 15000);
-        await passInput.click();
         await humanType(passInput, "Azerty12345!");
         await sleep(1000);
 
-        // --- 4. DATE ---
+        // --- 3. DATE ---
         console.log("Saisie Date...");
         let selects = await browser.findElements(By.tagName("select"));
         if(selects.length >= 3) {
@@ -81,14 +75,21 @@ async function humanType(element, text) {
             await selects[1].sendKeys("15");
             await selects[2].sendKeys("1996");
         }
-        await sleep(1500);
+        await sleep(2000);
 
-        // --- 5. NOM & USER ---
+        // --- 4. SCROLL & DÉBLOCAGE ---
+        console.log("Défilement vers le bas...");
+        await browser.executeScript("window.scrollTo(0, document.body.scrollHeight);");
+        await sleep(1000);
+
+        // --- 5. NOM & USER (SÉLECTEURS FLEXIBLES) ---
         console.log("Saisie Identité...");
-        let nameInput = await browser.wait(until.elementLocated(By.name("fullName")), 10000);
+        let nameInput = await browser.wait(until.elementLocated(By.xpath("//input[@name='fullName'] | //input[contains(@aria-label, 'Full Name')]")), 10000);
+        await nameInput.click();
         await humanType(nameInput, "Alan Azad");
 
-        let userInput = await browser.wait(until.elementLocated(By.name("username")), 10000);
+        let userInput = await browser.wait(until.elementLocated(By.xpath("//input[@name='username'] | //input[contains(@aria-label, 'Username')]")), 10000);
+        await userInput.click();
         await humanType(userInput, "azad_bot_" + Math.floor(Math.random()*99999));
 
         // Screenshot final
