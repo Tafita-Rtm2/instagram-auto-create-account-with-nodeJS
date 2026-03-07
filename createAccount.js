@@ -130,9 +130,7 @@ async function getCsrfAndCookie() {
 
 // Créer le compte via l'endpoint web réel d'Instagram
 async function createIgAccount(csrf, cookieStr, month, day, year) {
-    // Endpoint correct (celui que le vrai navigateur utilise)
-    const url  = 'https://www.instagram.com/accounts/web_create_ajax/attempt/';
-    const body = encode({
+    const commonBody = {
         enc_password          : '#PWD_INSTAGRAM_BROWSER:0:' + Date.now() + ':' + state.password,
         email                 : state.email,
         username              : state.uName,
@@ -146,7 +144,7 @@ async function createIgAccount(csrf, cookieStr, month, day, year) {
         force_sign_in_page    : '0',
         suggestedUsername     : '',
         do_not_send_sms       : 'false',
-    });
+    };
 
     const headers = {
         'User-Agent'      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -164,13 +162,38 @@ async function createIgAccount(csrf, cookieStr, month, day, year) {
         'Cookie'          : cookieStr,
     };
 
-    log('   📡 POST ' + url);
-    const res  = await fetch(url, { method: 'POST', headers, body });
-    const text = await res.text();
-    log('   📡 HTTP ' + res.status + ' : ' + text.substring(0, 300));
+    // Étape 1 : dry run (attempt) — vérifie que tout est valide
+    log('   📡 Étape 1 : dry run...');
+    const dryRes  = await fetch('https://www.instagram.com/accounts/web_create_ajax/attempt/', {
+        method: 'POST', headers, body: encode(commonBody)
+    });
+    const dryText = await dryRes.text();
+    log('   📡 Dry run ' + dryRes.status + ' : ' + dryText.substring(0, 150));
 
-    try { return JSON.parse(text); }
-    catch(e) { return { error: text.substring(0, 200) }; }
+    let dryData = {};
+    try { dryData = JSON.parse(dryText); } catch(e) { return { error: dryText.substring(0, 200) }; }
+
+    // Si le dry run échoue (erreurs de validation)
+    if (dryData.errors && Object.keys(dryData.errors).length > 0) {
+        return dryData;
+    }
+
+    if (!dryData.dryrun_passed && !dryData.account_created) {
+        log('   ⚠️ Dry run non passé');
+        return dryData;
+    }
+
+    // Étape 2 : vraie création
+    await sleep(1000);
+    log('   📡 Étape 2 : création réelle...');
+    const realRes  = await fetch('https://www.instagram.com/accounts/web_create_ajax/', {
+        method: 'POST', headers, body: encode(commonBody)
+    });
+    const realText = await realRes.text();
+    log('   📡 Création ' + realRes.status + ' : ' + realText.substring(0, 300));
+
+    try { return JSON.parse(realText); }
+    catch(e) { return { error: realText.substring(0, 200) }; }
 }
 
 // ─── SERVEUR EXPRESS ──────────────────────────────────────────────────────────
