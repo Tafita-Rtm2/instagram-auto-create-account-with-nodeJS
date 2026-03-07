@@ -275,97 +275,137 @@ app.get('/screenshot', (req, res) => {
 // ✅ Injection date + submit (avec scroll pour trouver le bouton)
 // ✅ Injection date via querySelector direct + React native setter
 // ✅ Injection date — essaie toutes les formes possibles
+// ✅ Injection date via clic sur les vrais dropdowns React Instagram
 app.post('/inject-date-and-submit', async (req, res) => {
     const { month, day, year } = req.body;
     const monthNum = parseInt(month);
-    // Toutes les formes possibles pour le mois
-    const monthForms = [
-        String(monthNum),
-        ['January','February','March','April','May','June','July','August','September','October','November','December'][monthNum-1],
-        ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'][monthNum-1],
-        ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][monthNum-1],
-    ];
-    console.log(`📅 Injection : jour=${day} mois=${month}(${monthForms[1]}) année=${year}`);
+    console.log(`📅 Injection : jour=${day} mois=${month} année=${year}`);
 
     try {
         if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
 
-        // Tout faire en JS pur dans le navigateur
-        const result = await browserRef.executeScript(`
-            var monthForms = arguments[0]; // tableau de formes possibles
-            var day        = String(arguments[1]);
-            var year       = String(arguments[2]);
-            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+        // ── Trouver les vrais selects de date par leur contenu ────────────────
+        // Instagram rend Month/Day/Year comme des <select> mais avec des aria-label
+        // ou on peut les trouver par leur position dans le DOM autour du label "Birthday"
+        const debugInfo = await browserRef.executeScript(`
+            // Chercher TOUS les selects et leurs options pour debug
+            var all = Array.from(document.querySelectorAll('select'));
+            var info = all.map(function(s, i) {
+                return {
+                    idx: i,
+                    opts: Array.from(s.options).map(function(o){ return {v:o.value, t:o.text.trim()}; }),
+                    aria: s.getAttribute('aria-label'),
+                    name: s.getAttribute('name'),
+                    id:   s.getAttribute('id'),
+                    class: s.className
+                };
+            });
+            // Aussi chercher les selects cachés ou via React fiber
+            var allEls = Array.from(document.querySelectorAll('*'));
+            var selectLike = allEls.filter(function(el){
+                return el.tagName === 'SELECT';
+            });
+            return { selects: info, total: all.length, selectLike: selectLike.length };
+        `);
+        console.log(`   Debug selects: ${JSON.stringify(debugInfo)}`);
 
-            function trySet(sel, candidates) {
-                var opts = Array.from(sel.options);
+        // ── Stratégie : utiliser les Actions Selenium pour cliquer sur les dropdowns ──
+        // On connaît la position approximative des selects Month/Day/Year
+        // depuis le screenshot (ils sont dans la section Birthday)
+        
+        // D'abord, essayer via aria-label
+        const injectResult = await browserRef.executeScript(`
+            var monthNum = arguments[0];
+            var dayNum   = arguments[1];
+            var yearNum  = arguments[2];
+            
+            var months_en = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+            var months_fr = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
+            
+            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+            
+            function setByAria(label, candidates) {
+                var sel = document.querySelector('select[aria-label="'+label+'"]');
+                if (!sel) return null;
                 for (var ci = 0; ci < candidates.length; ci++) {
                     var v = String(candidates[ci]);
-                    for (var oi = 0; oi < opts.length; oi++) {
-                        if (opts[oi].value === v || opts[oi].text.trim() === v || opts[oi].text.trim().toLowerCase() === v.toLowerCase()) {
-                            nativeSetter.call(sel, opts[oi].value);
+                    for (var oi = 0; oi < sel.options.length; oi++) {
+                        if (sel.options[oi].value === v || sel.options[oi].text.trim().toLowerCase() === v.toLowerCase()) {
+                            nativeSetter.call(sel, sel.options[oi].value);
                             ['input','change','blur'].forEach(function(n){ sel.dispatchEvent(new Event(n,{bubbles:true})); });
-                            return opts[oi].text.trim();
+                            return sel.options[oi].text.trim();
                         }
                     }
                 }
-                // Log des options disponibles pour debug
-                return 'FAILED(opts:' + opts.slice(1,4).map(function(o){return o.text.trim();}).join(',') + ')';
+                return 'aria_found_but_no_match';
             }
-
-            function dayForms(d)  { return [d, String(parseInt(d))]; }
-            function yearForms(y) { return [y, String(parseInt(y))]; }
-
-            var selects = Array.from(document.querySelectorAll('select'));
-            var log = ['total='+selects.length];
-
-            if (selects.length === 0) return {ok:false, msg:'Aucun select dans le DOM'};
-
-            var mResult, dResult, yResult;
-
-            if (selects.length >= 3) {
-                // Détecter l'ordre : regarder les options du 1er select
-                var first3 = Array.from(selects[0].options).slice(1,3).map(function(o){return o.text.trim();}).join(',');
-                log.push('order_hint='+first3);
-                var monthFirst = /jan|fév|mar/i.test(first3);
-                var mI = monthFirst ? 0 : 1;
-                var dI = monthFirst ? 1 : 0;
-                var yI = 2;
-                mResult = trySet(selects[mI], monthForms);
-                dResult = trySet(selects[dI], dayForms(day));
-                yResult = trySet(selects[yI], yearForms(year));
-            } else {
-                // 1 seul select — c'est probablement le Month
-                mResult = trySet(selects[0], monthForms);
-                log.push('after_month='+mResult);
-                // Attendre React
-                var waitStart = Date.now();
-                while(Date.now()-waitStart < 2000) {
-                    selects = Array.from(document.querySelectorAll('select'));
-                    if(selects.length >= 3) break;
+            
+            // Essayer avec différents aria-label possibles
+            var mResult = setByAria('Month', [months_en[monthNum-1], months_fr[monthNum-1], String(monthNum)])
+                       || setByAria('Mois',  [months_en[monthNum-1], months_fr[monthNum-1], String(monthNum)])
+                       || setByAria('month', [months_en[monthNum-1], months_fr[monthNum-1], String(monthNum)]);
+            
+            var dResult = setByAria('Day',  [String(dayNum)])
+                       || setByAria('Jour', [String(dayNum)])
+                       || setByAria('day',  [String(dayNum)]);
+            
+            var yResult = setByAria('Year',  [String(yearNum)])
+                       || setByAria('Année', [String(yearNum)])
+                       || setByAria('year',  [String(yearNum)]);
+            
+            // Si aria échoue, essayer par index (skip le 1er select = langue)
+            if (!mResult || !dResult || !yResult) {
+                var allSelects = Array.from(document.querySelectorAll('select'));
+                // Filtrer le select de langue (ses options contiennent des noms de langues)
+                var dateSelects = allSelects.filter(function(s) {
+                    var opts = Array.from(s.options).map(function(o){ return o.text.trim(); });
+                    // Le select de langue a des langues, pas des mois/jours
+                    var isLang = opts.some(function(t){ return /arabic|english|français|español|deutsch/i.test(t); });
+                    return !isLang;
+                });
+                
+                if (dateSelects.length >= 3) {
+                    var opt1 = dateSelects[0].options.length > 1 ? dateSelects[0].options[1].text.trim() : '';
+                    var monthFirst = /jan|fév/i.test(opt1);
+                    var mSel = dateSelects[monthFirst ? 0 : 1];
+                    var dSel = dateSelects[monthFirst ? 1 : 0];
+                    var ySel = dateSelects[2];
+                    
+                    function setOne(sel, candidates) {
+                        for (var ci = 0; ci < candidates.length; ci++) {
+                            var v = String(candidates[ci]);
+                            for (var oi = 0; oi < sel.options.length; oi++) {
+                                if (sel.options[oi].value === v || sel.options[oi].text.trim().toLowerCase() === v.toLowerCase()) {
+                                    nativeSetter.call(sel, sel.options[oi].value);
+                                    ['input','change','blur'].forEach(function(n){ sel.dispatchEvent(new Event(n,{bubbles:true})); });
+                                    return sel.options[oi].text.trim();
+                                }
+                            }
+                        }
+                        return 'no_match('+sel.options[1].text+')';
+                    }
+                    
+                    if (!mResult) mResult = setOne(mSel, [months_en[monthNum-1], months_fr[monthNum-1], String(monthNum)]);
+                    if (!dResult) dResult = setOne(dSel, [String(dayNum)]);
+                    if (!yResult) yResult = setOne(ySel, [String(yearNum)]);
                 }
-                log.push('after_wait='+selects.length);
-                dResult = selects.length >= 2 ? trySet(selects[1], dayForms(day))  : 'NO_SELECT';
-                yResult = selects.length >= 3 ? trySet(selects[2], yearForms(year)): 'NO_SELECT';
             }
+            
+            return { m: mResult||'null', d: dResult||'null', y: yResult||'null' };
+        `, monthNum, parseInt(day), parseInt(year));
 
-            log.push('month='+mResult, 'day='+dResult, 'year='+yResult);
-            var allOk = !mResult.startsWith('FAILED') && !dResult.startsWith('FAILED') && !yResult.startsWith('FAILED')
-                        && mResult !== 'NO_SELECT' && dResult !== 'NO_SELECT' && yResult !== 'NO_SELECT';
-            return {ok: allOk, log: log, m:mResult, d:dResult, y:yResult};
-        `, monthForms, day, year);
-
-        console.log(`   Résultat : m="${result.m}" d="${result.d}" y="${result.y}"`);
-        console.log(`   Log : ${result.log.join(' | ')}`);
-        await sleep(800);
+        console.log(`   Injection : m="${injectResult.m}" d="${injectResult.d}" y="${injectResult.y}"`);
+        await sleep(600);
         state.screenshot = await browserRef.takeScreenshot();
 
-        if (!result.ok) {
-            return res.json({ ok:false, msg:`❌ Injection échouée — m=${result.m} d=${result.d} y=${result.y}` });
+        // Vérifier que ça a marché
+        const failed = !injectResult.m || injectResult.m.startsWith('null') || injectResult.m.includes('no_match') || injectResult.m.includes('FAILED');
+        if (failed) {
+            return res.json({ ok:false, msg:`❌ m=${injectResult.m} | d=${injectResult.d} | y=${injectResult.y}` });
         }
 
-        // Submit via JS pur avec scrollIntoView
-        const submitResult = await browserRef.executeScript(`
+        // Submit
+        const submitRes = await browserRef.executeScript(`
             var btns = Array.from(document.querySelectorAll('button'));
             var btn = null;
             for (var i = 0; i < btns.length; i++) {
@@ -378,17 +418,15 @@ app.post('/inject-date-and-submit', async (req, res) => {
                 btn.removeAttribute('disabled');
                 btn.scrollIntoView({block:'center',behavior:'instant'});
                 btn.click();
-                return {ok:true, txt: btn.textContent.trim()};
+                return btn.textContent.trim();
             }
-            return {ok:false, count: btns.length};
+            return null;
         `);
-
-        console.log(`   Submit : ${JSON.stringify(submitResult)}`);
+        console.log(`   Submit : "${submitRes}"`);
         await sleep(3000);
         state.screenshot = await browserRef.takeScreenshot();
         state.status = 'waiting_code';
-
-        res.json({ ok:true, msg:`✅ Date: ${result.m}/${result.d}/${result.y} — Submit cliqué !` });
+        res.json({ ok:true, msg:`✅ ${injectResult.m}/${injectResult.d}/${injectResult.y} — soumis !` });
 
     } catch(e) {
         console.error("❌ inject : " + e.message);
