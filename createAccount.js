@@ -79,52 +79,42 @@ function encode(obj) {
         .join('&');
 }
 
-// Récupérer CSRF + tous les cookies nécessaires
+// Récupérer CSRF + cookies — frappe la page d'accueil comme le script Python
 async function getCsrfAndCookie() {
     try {
-        const res = await fetch('https://www.instagram.com/accounts/emailsignup/', {
+        const UA = 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36';
+
+        // Étape 1 : page d'accueil pour obtenir mid + csrftoken (comme s.get(link) en Python)
+        const homeRes = await fetch('https://www.instagram.com/', {
             headers: {
-                'User-Agent'     : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
+                'User-Agent'     : UA,
                 'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Sec-Fetch-Site' : 'none',
-                'Sec-Fetch-Mode' : 'navigate',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Connection'     : 'keep-alive',
             }
         });
 
-        const rawCookies = res.headers.raw()['set-cookie'] || [];
+        const rawCookies = homeRes.headers.raw()['set-cookie'] || [];
         const cookieMap  = {};
         for (const c of rawCookies) {
-            const part = c.split(';')[0];
+            const part = c.split(';')[0].trim();
             const idx  = part.indexOf('=');
             if (idx > 0) {
-                const k = part.substring(0, idx).trim();
-                const v = part.substring(idx + 1).trim();
-                cookieMap[k] = v;
+                cookieMap[part.substring(0, idx).trim()] = part.substring(idx + 1).trim();
             }
         }
 
-        let csrf = cookieMap['csrftoken'] || '';
-
-        // Fallback dans le HTML si pas dans les cookies
-        if (!csrf) {
-            const html = await res.text();
-            const m = html.match(/"csrf_token"\s*:\s*"([^"]+)"/);
-            if (m) csrf = m[1];
-            // Autre pattern possible
-            if (!csrf) {
-                const m2 = html.match(/csrftoken=([a-zA-Z0-9]+)/);
-                if (m2) csrf = m2[1];
-            }
-        }
-
+        const csrf      = cookieMap['csrftoken'] || '';
+        const mid       = cookieMap['mid']       || '';
         const cookieStr = Object.entries(cookieMap).map(function(e){ return e[0]+'='+e[1]; }).join('; ');
+
         log('   🔐 CSRF : ' + (csrf ? csrf.substring(0, 10) + '...' : 'NON TROUVÉ'));
+        log('   📱 mid  : ' + (mid  ? mid.substring(0, 10)  + '...' : 'NON TROUVÉ'));
         log('   🍪 Cookies : ' + Object.keys(cookieMap).join(', '));
-        return { csrf, cookieStr, cookieMap };
+        return { csrf, mid, cookieStr, cookieMap };
     } catch(e) {
         log('⚠️ getCsrf : ' + e.message);
-        return { csrf: '', cookieStr: '', cookieMap: {} };
+        return { csrf: '', mid: '', cookieStr: '', cookieMap: {} };
     }
 }
 
@@ -471,7 +461,7 @@ app.post('/create', async function(req, res) {
     try {
         // 1. Obtenir CSRF + cookies
         log('🔐 Récupération CSRF...');
-        const { csrf, cookieStr, cookieMap } = await getCsrfAndCookie();
+        const { csrf, mid, cookieStr, cookieMap } = await getCsrfAndCookie();
         if (!csrf) {
             state.status = 'ready';
             return res.json({ ok: false, msg: '❌ CSRF introuvable — réessaie' });
@@ -503,9 +493,7 @@ app.post('/create', async function(req, res) {
 
         // 3. Créer le compte (flow complet)
         log('📡 Envoi requête création...');
-        const mid = cookieMap['mid'] || Math.random().toString(36).slice(2, 12);
-        log('   📱 mid : ' + mid.substring(0, 10) + '...');
-        state.status = 'waiting_code'; // Passer en waiting_code pour afficher la page code
+        state.status = 'waiting_code';
         const result = await createIgAccount(csrf, cookieStr, mid, month, day, year);
 
         // Succès
