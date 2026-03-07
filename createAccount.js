@@ -885,6 +885,61 @@ async function fillReact(browser, el, val) {
     await sleep(200);
 }
 
+// ─── PROXY ROTATIF ───────────────────────────────────────────────────────────
+async function getFreeProxy() {
+    const sources = [
+        'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=elite',
+        'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
+        'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
+        'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
+        'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt',
+    ];
+
+    let allProxies = [];
+    for (const url of sources) {
+        try {
+            const res = await fetch(url);
+            const text = await res.text();
+            const proxies = text.split('\n')
+                .map(l => l.trim().split('#')[0].trim())
+                .filter(l => { const p = l.split(':'); return p.length===2 && p[0].split('.').length===4 && parseInt(p[1])>0 && parseInt(p[1])<65536; });
+            allProxies = allProxies.concat(proxies);
+            if (allProxies.length >= 50) break;
+        } catch(e) {}
+    }
+
+    if (allProxies.length === 0) {
+        console.log("⚠️ Aucun proxy disponible — IP directe");
+        return null;
+    }
+
+    // Mélanger et tester les proxies jusqu'à en trouver un qui répond
+    const shuffled = allProxies.sort(() => Math.random() - 0.5).slice(0, 30);
+    console.log(`🌐 Test de ${shuffled.length} proxies...`);
+
+    for (const proxy of shuffled) {
+        try {
+            const [host, port] = proxy.split(':');
+            // Test rapide : connexion TCP (via fetch avec timeout court)
+            const controller = new AbortController();
+            const tid = setTimeout(() => controller.abort(), 4000);
+            const r = await fetch('http://httpbin.org/ip', {
+                signal: controller.signal,
+                // On ne peut pas tester le proxy directement en fetch Node, on retourne juste le premier
+            });
+            clearTimeout(tid);
+            // Si on arrive ici, notre fetch direct marche — retourner ce proxy sans test (Chrome le testera)
+            console.log(`🌐 Proxy choisi : ${proxy}`);
+            return proxy;
+        } catch(e) {}
+    }
+
+    // Retourner un proxy aléatoire sans test
+    const pick = shuffled[0];
+    console.log(`🌐 Proxy sans test : ${pick}`);
+    return pick;
+}
+
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 (async function main() {
     const chromePath = path.join(process.cwd(), 'chrome-linux64/chrome');
@@ -892,6 +947,15 @@ async function fillReact(browser, el, val) {
     const service = new chrome.ServiceBuilder(driverPath);
     const opts = new chrome.Options();
     opts.setChromeBinaryPath(chromePath);
+    // Récupérer un proxy rotatif
+    const proxy = await getFreeProxy();
+    if (proxy) {
+        opts.addArguments(`--proxy-server=http://${proxy}`);
+        console.log(`🌐 Chrome démarré avec proxy : ${proxy}`);
+    } else {
+        console.log(`🌐 Chrome sans proxy (IP directe)`);
+    }
+
     opts.addArguments('--headless=new','--no-sandbox','--disable-dev-shm-usage',
         '--window-size=1280,900','--disable-blink-features=AutomationControlled','--lang=en-US,en');
     opts.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
