@@ -582,20 +582,54 @@ async function fillReact(browser, el, val) {
             await sleep(400);
         }
 
+        // Saisir le username et vérifier qu'il est disponible (pas d'erreur rouge)
         if (textInputs.length >= 1) {
             let userInp = textInputs[textInputs.length - 1];
-            await browser.executeScript("arguments[0].click();arguments[0].focus();", userInp);
-            await sleep(200);
-            await browser.executeScript(`
-                var e=arguments[0];
-                Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(e,'');
-                e.dispatchEvent(new Event('input',{bubbles:true}));
-            `, userInp);
-            await sleep(150);
-            await humanType(userInp, state.uName);
-            await fillReact(browser, userInp, state.uName);
-            console.log("✅ Username : " + state.uName);
-            await sleep(1000);
+            let usernameOk = false;
+            for (let attempt = 0; attempt < 8; attempt++) {
+                // Générer un nouveau username si ce n'est pas le premier essai
+                if (attempt > 0) {
+                    const { username: genUsername } = require('./accountInfoGenerator');
+                    state.uName = genUsername();
+                    console.log(`   🔄 Nouveau username (essai ${attempt+1}) : ${state.uName}`);
+                }
+                // Vider et remplir le champ
+                await browser.executeScript("arguments[0].click();arguments[0].focus();", userInp);
+                await sleep(150);
+                await browser.executeScript(`
+                    var e=arguments[0];
+                    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(e,'');
+                    e.dispatchEvent(new Event('input',{bubbles:true}));
+                `, userInp);
+                await sleep(100);
+                await humanType(userInp, state.uName);
+                await fillReact(browser, userInp, state.uName);
+                await sleep(1500); // Attendre la vérification Instagram
+                // Vérifier s'il y a une erreur "not available"
+                const hasError = await browser.executeScript(`
+                    var errs = Array.from(document.querySelectorAll('p,span,div'));
+                    return errs.some(function(el){
+                        var t = el.textContent.toLowerCase();
+                        return (t.includes('not available') || t.includes('pas disponible') || t.includes('already taken') || t.includes('déjà pris')) && el.offsetHeight > 0;
+                    });
+                `);
+                // Vérifier s'il y a un checkmark vert (username dispo)
+                const hasCheck = await browser.executeScript(`
+                    var checks = Array.from(document.querySelectorAll('svg,[aria-label*="check"],[aria-label*="valid"]'));
+                    var inp = document.querySelector('input[aria-label="Username"]') || document.querySelectorAll('input[type="text"]')[document.querySelectorAll('input[type="text"]').length-1];
+                    if (inp) {
+                        var parent = inp.parentElement;
+                        while(parent && parent.tagName !== 'FORM') {
+                            if(parent.querySelector('svg')) return true;
+                            parent = parent.parentElement;
+                        }
+                    }
+                    return false;
+                `);
+                console.log(`   Username "${state.uName}" : erreur=${hasError} check=${hasCheck}`);
+                if (!hasError) { usernameOk = true; break; }
+            }
+            console.log(`✅ Username final : ${state.uName} (ok=${usernameOk})`);
         }
 
         // ── 7. ATTENTE SAISIE DATE PAR L'UTILISATEUR ──────────────────────────
