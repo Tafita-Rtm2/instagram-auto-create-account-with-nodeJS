@@ -5,15 +5,13 @@ const express = require('express');
 const fs = require('fs');
 const cheerio = require("cheerio");
 const fetch = require('node-fetch');
-const _ = require('lodash');
 
 const app = express();
 const port = process.env.PORT || 10000;
-
 app.get('/', (req, res) => {
     if (fs.existsSync('error_screenshot.png')) {
-        res.send('<h1>Aperçu du Bot</h1><img src="/debug-image" style="width:100%;max-width:500px;">');
-    } else { res.send('Bot en cours...'); }
+        res.send('<h1>Aperçu Bot</h1><img src="/debug-image" style="width:100%;max-width:500px;">');
+    } else { res.send('Bot en attente...'); }
 });
 app.get('/debug-image', (req, res) => { res.sendFile(path.join(process.cwd(), 'error_screenshot.png')); });
 app.listen(port, '0.0.0.0');
@@ -32,7 +30,7 @@ async function getFakeMail() {
 async function humanType(element, text) {
     for (let char of text) {
         await element.sendKeys(char);
-        await sleep(Math.random() * 100 + 30);
+        await sleep(Math.random() * 80 + 20);
     }
 }
 
@@ -50,58 +48,62 @@ async function humanType(element, text) {
     let browser = await new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(service).build();
 
     try {
-        console.log("Navigation vers Instagram...");
-        await browser.get("https://www.instagram.com/accounts/signup/email/");
-        await sleep(5000);
+        let attempts = 0;
+        let found = false;
 
-        // --- ÉTAPE 1 : EMAIL ---
-        console.log("Recherche email...");
-        let emailInput = await browser.wait(until.elementLocated(By.name("emailOrPhone")), 15000);
-        let fakeMail = await getFakeMail();
-        console.log("Saisie : " + fakeMail);
-        await emailInput.click();
-        await humanType(emailInput, fakeMail);
-        await sleep(2000); // Pause pour laisser Instagram valider l'email
+        while (attempts < 3 && !found) {
+            console.log(`Tentative ${attempts + 1} : Navigation vers Instagram...`);
+            await browser.get("https://www.instagram.com/accounts/signup/email/");
+            await sleep(7000);
 
-        // --- ÉTAPE 2 : PASSWORD ---
-        console.log("Attente du password...");
-        let passwordInput = await browser.wait(until.elementLocated(By.name("password")), 15000);
+            try {
+                // On cherche l'email avec un sélecteur très large
+                let emailInput = await browser.wait(until.elementLocated(By.xpath("//input[contains(@name,'emailOrPhone')] | //input[@type='text']")), 10000);
+                found = true;
+                console.log("Champ trouvé !");
+                
+                let fakeMail = await getFakeMail();
+                console.log("Saisie : " + fakeMail);
+                await emailInput.click();
+                await humanType(emailInput, fakeMail);
+            } catch (e) {
+                attempts++;
+                console.log("Champ non trouvé, nouvel essai...");
+                let img = await browser.takeScreenshot();
+                fs.writeFileSync('error_screenshot.png', img, 'base64');
+            }
+        }
+
+        if (!found) throw new Error("Impossible de charger le formulaire après 3 essais.");
+
+        // --- PASSWORD ---
+        let passwordInput = await browser.wait(until.elementLocated(By.name("password")), 10000);
         await passwordInput.click();
         await humanType(passwordInput, "me47m47eaa");
-        await sleep(1500);
 
-        // --- ÉTAPE 3 : DATE ---
-        console.log("Saisie date...");
-        let selects = await browser.wait(until.elementsLocated(By.tagName("select")), 10000);
-        await selects[0].sendKeys("March");
-        await sleep(500);
-        await selects[1].sendKeys("12");
-        await sleep(500);
-        await selects[2].sendKeys("1995");
-        await sleep(1500);
+        // --- DATE ---
+        let selects = await browser.findElements(By.tagName("select"));
+        if(selects.length >= 3) {
+            await selects[0].sendKeys("March");
+            await selects[1].sendKeys("12");
+            await selects[2].sendKeys("1995");
+        }
 
-        // --- ÉTAPE 4 : NAME ---
-        console.log("Saisie nom...");
+        // --- NAME & USERNAME ---
         let nameInput = await browser.wait(until.elementLocated(By.name("fullName")), 10000);
-        await nameInput.click();
         await humanType(nameInput, "Alan Azad");
-        await sleep(1000);
 
-        // --- ÉTAPE 5 : USERNAME ---
-        console.log("Saisie username...");
         let userInput = await browser.wait(until.elementLocated(By.name("username")), 10000);
-        await userInput.click();
         await humanType(userInput, "alan_azad_" + Math.floor(Math.random()*9999));
-        await sleep(2000);
 
-        // Screenshot pour vérifier que tout est rempli
+        // Screenshot final
+        await sleep(2000);
         let finalPic = await browser.takeScreenshot();
         fs.writeFileSync('error_screenshot.png', finalPic, 'base64');
 
-        // --- ÉTAPE 6 : SUBMIT ---
         let submitBtn = await browser.wait(until.elementLocated(By.xpath("//button[@type='submit']")), 10000);
         await submitBtn.click();
-        console.log("Terminé ! Vérifiez l'image sur Render.");
+        console.log("Formulaire soumis !");
 
     } catch (e) {
         console.error("ERREUR : " + e.message);
