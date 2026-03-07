@@ -8,7 +8,6 @@ const email = require('./createFakeMail');
 const sleep = (waitTimeInMs) => new Promise(resolve => setTimeout(resolve, waitTimeInMs));
 
 (async function fakeInstagramAccount() {
-  // --- CONFIGURATION CHEMINS RENDER ---
   const chromePath = path.join(process.cwd(), 'chrome-linux64/chrome');
   const driverPath = path.join(process.cwd(), 'chromedriver-linux64/chromedriver');
 
@@ -16,14 +15,11 @@ const sleep = (waitTimeInMs) => new Promise(resolve => setTimeout(resolve, waitT
   let options = new chrome.Options();
   
   options.setChromeBinaryPath(chromePath);
-  
-  // Arguments indispensables pour un serveur sans écran
   options.addArguments('--headless=new'); 
   options.addArguments('--no-sandbox');
   options.addArguments('--disable-dev-shm-usage');
   options.addArguments('--disable-gpu');
   options.addArguments('--window-size=1920,1080');
-  // Simulation d'un vrai navigateur pour éviter d'être bloqué trop vite
   options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
   console.log("Démarrage de Chrome...");
@@ -34,49 +30,67 @@ const sleep = (waitTimeInMs) => new Promise(resolve => setTimeout(resolve, waitT
     .build();
 
   try {
+    console.log("Navigation vers Instagram...");
     await browser.get("https://www.instagram.com/accounts/signup/email/");
-    await sleep(7000);
 
+    // --- GESTION DES COOKIES ---
+    try {
+      // Attend 5 secondes max pour le bouton "Accepter tout" si il apparaît
+      let cookieBtn = await browser.wait(until.elementLocated(By.xpath("//button[contains(text(), 'Autoriser') or contains(text(), 'Accept')]")), 5000);
+      await cookieBtn.click();
+      console.log("Cookies acceptés.");
+    } catch (e) {
+      console.log("Pas de pop-up de cookies détectée.");
+    }
+
+    // --- ATTENTE DU FORMULAIRE ---
+    console.log("Attente du champ email...");
+    let emailInput = await browser.wait(until.elementLocated(By.name("emailOrPhone")), 15000);
+    
     let fakeMail = await email.getFakeMail();
     console.log("Email utilisé : " + fakeMail);
 
-    await browser.findElement(By.name("emailOrPhone")).sendKeys(fakeMail, Key.RETURN);
+    await emailInput.sendKeys(fakeMail, Key.RETURN);
     await sleep(2000);
     
-    await browser.findElement(By.name("fullName")).sendKeys(await accountInfo.generatingName(), Key.RETURN);
-    await sleep(2000);
+    // Remplissage du reste avec des attentes
+    let nameInput = await browser.wait(until.elementLocated(By.name("fullName")), 5000);
+    await nameInput.sendKeys(await accountInfo.generatingName(), Key.RETURN);
+    
+    let userInput = await browser.wait(until.elementLocated(By.name("username")), 5000);
+    await userInput.sendKeys(await accountInfo.username(), Key.RETURN);
+    
+    let passInput = await browser.wait(until.elementLocated(By.name("password")), 5000);
+    await passInput.sendKeys("me47m47eaa", Key.RETURN);
 
-    await browser.findElement(By.name("username")).sendKeys(await accountInfo.username(), Key.RETURN);
-    await sleep(3000);
-
-    await browser.findElement(By.name("password")).sendKeys("me47m47eaa", Key.RETURN);
     await sleep(5000);
 
-    // Sélection Date de naissance
-    await browser.findElement(By.xpath("//select[contains(@title, 'Mois')]/option[3]")).click();
-    await sleep(1000);
-    await browser.findElement(By.xpath("//select[contains(@title, 'Jour')]/option[12]")).click();
-    await sleep(1000);
-    await browser.findElement(By.xpath("//select[contains(@title, 'Année')]/option[26]")).click();
-    await sleep(3000);
+    // Sélection Date (Xpath plus générique)
+    await (await browser.findElement(By.xpath("//select[@title='Mois'] or //select[1]"))).sendKeys("Mars");
+    await (await browser.findElement(By.xpath("//select[@title='Jour'] or //select[2]"))).sendKeys("12");
+    await (await browser.findElement(By.xpath("//select[@title='Année'] or //select[3]"))).sendKeys("1995");
     
-    await browser.findElement(By.xpath("//button[text()='Suivant' or @type='submit']")).click();
-    await sleep(8000);
+    let nextBtn = await browser.findElement(By.xpath("//button[@type='submit']"));
+    await nextBtn.click();
+    
+    console.log("Formulaire soumis, attente du code...");
+    await sleep(10000);
 
     let fMail = fakeMail.split("@");
-    let mailName = fMail[0];
-    let domain = fMail[1];
-    
-    console.log("Attente du code Instagram...");
-    let veriCode = await verifiCode.getInstCode(domain, mailName, browser);
+    let veriCode = await verifiCode.getInstCode(fMail[1], fMail[0], browser);
     console.log("Code reçu : " + veriCode);
     
-    await sleep(2000);
-    await browser.findElement(By.name("email_confirmation_code")).sendKeys(veriCode, Key.RETURN);
+    let codeInput = await browser.wait(until.elementLocated(By.name("email_confirmation_code")), 10000);
+    await codeInput.sendKeys(veriCode, Key.RETURN);
 
   } catch (e) {
-    console.error("ERREUR :");
-    console.error(e);
+    console.error("ERREUR lors de la recherche d'élément :");
+    console.error(e.message);
+    // Prendre une capture d'écran pour débugger sur Render si ça échoue encore
+    await browser.takeScreenshot().then(image => {
+        require('fs').writeFileSync('error_screenshot.png', image, 'base64');
+        console.log("Screenshot d'erreur enregistré sous error_screenshot.png");
+    });
   } finally {
     console.log("Fermeture du navigateur.");
     await browser.quit();
