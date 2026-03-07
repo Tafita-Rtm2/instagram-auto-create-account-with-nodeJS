@@ -128,72 +128,130 @@ async function getCsrfAndCookie() {
     }
 }
 
-// Créer le compte via l'endpoint web réel d'Instagram
-async function createIgAccount(csrf, cookieStr, month, day, year) {
-    const commonBody = {
-        enc_password          : '#PWD_INSTAGRAM_BROWSER:0:' + Date.now() + ':' + state.password,
+// Créer le compte — flow complet en 4 étapes (basé sur le vrai flow Instagram)
+async function createIgAccount(csrf, cookieStr, mid, month, day, year) {
+    const timestamp = Math.floor(Date.now() / 1000);
+    const enc_password = '#PWD_INSTAGRAM_BROWSER:0:' + timestamp + ':' + state.password;
+
+    const headers = {
+        'User-Agent'      : 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36',
+        'Accept'          : '*/*',
+        'Accept-Language' : 'en-US,en;q=0.9',
+        'Content-Type'    : 'application/x-www-form-urlencoded',
+        'X-CSRFToken'     : csrf,
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin'          : 'https://www.instagram.com',
+        'Referer'         : 'https://www.instagram.com/accounts/emailsignup/',
+        'Cookie'          : cookieStr,
+    };
+
+    // ── Étape 1 : dry run ────────────────────────────────────────────────────
+    log('   📡 Étape 1 : dry run...');
+    const dryBody = encode({
+        enc_password,
+        email             : state.email,
+        username          : state.uName,
+        first_name        : state.fullName,
+        opt_into_one_tap  : 'false',
+        client_id         : mid,
+        seamless_login_enabled: '1',
+    });
+
+    const dryRes  = await fetch('https://www.instagram.com/accounts/web_create_ajax/attempt/', {
+        method: 'POST', headers, body: dryBody
+    });
+    const dryText = await dryRes.text();
+    log('   Dry run ' + dryRes.status + ' : ' + dryText.substring(0, 120));
+
+    let dryData = {};
+    try { dryData = JSON.parse(dryText); } catch(e) { return { error: dryText.substring(0, 200) }; }
+
+    if (dryData.errors && Object.keys(dryData.errors).length > 0) {
+        return dryData; // Erreurs de validation (email pris, etc.)
+    }
+    if (!dryData.dryrun_passed) {
+        log('   ⚠️ Dry run échoué');
+        return dryData;
+    }
+
+    // ── Étape 2 : demander l'envoi du code email ─────────────────────────────
+    await sleep(1200);
+    log('   📡 Étape 2 : envoi code email...');
+    const verifyRes  = await fetch('https://i.instagram.com/api/v1/accounts/send_verify_email/', {
+        method : 'POST',
+        headers: Object.assign({}, headers, { 'Referer': 'https://www.instagram.com/' }),
+        body   : encode({ device_id: mid, email: state.email })
+    });
+    const verifyText = await verifyRes.text();
+    log('   Verify email ' + verifyRes.status + ' : ' + verifyText.substring(0, 120));
+
+    // ── Attendre le code ─────────────────────────────────────────────────────
+    log('   📬 Attente code email...');
+    let code = await getCodeFromMail();
+
+    if (!code) {
+        log('   ⏳ Code auto non reçu — attente manuelle (5 min)...');
+        const start = Date.now();
+        while (!state.confirmCode && (Date.now() - start) < 300000) {
+            await sleep(2000);
+        }
+        code = state.confirmCode;
+        state.confirmCode = '';
+    }
+
+    if (!code) {
+        return { error: 'Code non reçu' };
+    }
+
+    log('   🔑 Code reçu : ' + code);
+
+    // ── Étape 3 : vérifier le code → obtenir signup_code ────────────────────
+    await sleep(800);
+    log('   📡 Étape 3 : vérification code...');
+    const checkRes  = await fetch('https://i.instagram.com/api/v1/accounts/check_confirmation_code/', {
+        method : 'POST',
+        headers: Object.assign({}, headers, { 'Referer': 'https://www.instagram.com/' }),
+        body   : encode({ code, device_id: mid, email: state.email })
+    });
+    const checkText = await checkRes.text();
+    log('   Check code ' + checkRes.status + ' : ' + checkText.substring(0, 150));
+
+    let checkData = {};
+    try { checkData = JSON.parse(checkText); } catch(e) { return { error: checkText.substring(0, 200) }; }
+
+    const signup_code = checkData.signup_code;
+    if (!signup_code) {
+        log('   ❌ signup_code introuvable : ' + JSON.stringify(checkData).substring(0, 150));
+        return { error: 'signup_code introuvable — code incorrect ?' };
+    }
+    log('   ✅ signup_code : ' + signup_code);
+
+    // ── Étape 4 : création finale ─────────────────────────────────────────────
+    await sleep(800);
+    log('   📡 Étape 4 : création finale...');
+    const finalBody = encode({
+        enc_password,
         email                 : state.email,
         username              : state.uName,
         first_name            : state.fullName,
         month                 : String(month),
         day                   : String(day),
         year                  : String(year),
-        client_id             : Math.random().toString(36).slice(2, 12),
+        opt_into_one_tap      : 'false',
+        client_id             : mid,
         seamless_login_enabled: '1',
         tos_version           : 'row',
-        force_sign_in_page    : '0',
-        suggestedUsername     : '',
-        do_not_send_sms       : 'false',
-    };
-
-    const headers = {
-        'User-Agent'      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept'          : '*/*',
-        'Accept-Language' : 'en-US,en;q=0.9',
-        'Content-Type'    : 'application/x-www-form-urlencoded',
-        'X-CSRFToken'     : csrf,
-        'X-Instagram-AJAX': '1',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Origin'          : 'https://www.instagram.com',
-        'Referer'         : 'https://www.instagram.com/accounts/emailsignup/',
-        'Sec-Fetch-Dest'  : 'empty',
-        'Sec-Fetch-Mode'  : 'cors',
-        'Sec-Fetch-Site'  : 'same-origin',
-        'Cookie'          : cookieStr,
-    };
-
-    // Étape 1 : dry run (attempt) — vérifie que tout est valide
-    log('   📡 Étape 1 : dry run...');
-    const dryRes  = await fetch('https://www.instagram.com/accounts/web_create_ajax/attempt/', {
-        method: 'POST', headers, body: encode(commonBody)
+        force_sign_up_code    : signup_code,
     });
-    const dryText = await dryRes.text();
-    log('   📡 Dry run ' + dryRes.status + ' : ' + dryText.substring(0, 150));
 
-    let dryData = {};
-    try { dryData = JSON.parse(dryText); } catch(e) { return { error: dryText.substring(0, 200) }; }
-
-    // Si le dry run échoue (erreurs de validation)
-    if (dryData.errors && Object.keys(dryData.errors).length > 0) {
-        return dryData;
-    }
-
-    if (!dryData.dryrun_passed && !dryData.account_created) {
-        log('   ⚠️ Dry run non passé');
-        return dryData;
-    }
-
-    // Étape 2 : vraie création
-    await sleep(1000);
-    log('   📡 Étape 2 : création réelle...');
-    const realRes  = await fetch('https://www.instagram.com/accounts/web_create_ajax/', {
-        method: 'POST', headers, body: encode(commonBody)
+    const finalRes  = await fetch('https://www.instagram.com/accounts/web_create_ajax/', {
+        method: 'POST', headers, body: finalBody
     });
-    const realText = await realRes.text();
-    log('   📡 Création ' + realRes.status + ' : ' + realText.substring(0, 300));
+    const finalText = await finalRes.text();
+    log('   Création finale ' + finalRes.status + ' : ' + finalText.substring(0, 300));
 
-    try { return JSON.parse(realText); }
-    catch(e) { return { error: realText.substring(0, 200) }; }
+    try { return JSON.parse(finalText); }
+    catch(e) { return { error: finalText.substring(0, 200) }; }
 }
 
 // ─── SERVEUR EXPRESS ──────────────────────────────────────────────────────────
@@ -443,22 +501,25 @@ app.post('/create', async function(req, res) {
             }
         } catch(e) { log('⚠️ checkUsername : ' + e.message); }
 
-        // 3. Créer le compte
+        // 3. Créer le compte (flow complet)
         log('📡 Envoi requête création...');
-        const result = await createIgAccount(csrf, cookieStr, month, day, year);
+        const mid = cookieMap['mid'] || Math.random().toString(36).slice(2, 12);
+        log('   📱 mid : ' + mid.substring(0, 10) + '...');
+        state.status = 'waiting_code'; // Passer en waiting_code pour afficher la page code
+        const result = await createIgAccount(csrf, cookieStr, mid, month, day, year);
 
         // Succès
         if (result.account_created || result.status === 'ok' || result.user_id || result.userId) {
             log('✅ Compte créé avec succès !');
-            state.status = 'waiting_code';
-            return res.json({ ok: true, msg: '✅ Compte soumis ! Attends le code email...' });
+            state.status = 'done';
+            return res.json({ ok: true, msg: '✅ Compte créé !' });
         }
 
-        // Checkpoint (Instagram demande vérification)
-        if (result.checkpoint_url || (result.message && result.message.includes('checkpoint'))) {
-            log('🔒 Checkpoint détecté — vérifie l\'email');
-            state.status = 'waiting_code';
-            return res.json({ ok: true, msg: '⚠️ Checkpoint — code envoyé à ton email !' });
+        // Erreur interne (code non reçu, etc.)
+        if (result.error) {
+            log('❌ ' + result.error);
+            state.status = 'ready';
+            return res.json({ ok: false, msg: '❌ ' + result.error });
         }
 
         // Erreurs de champs
@@ -521,31 +582,10 @@ app.listen(PORT, '0.0.0.0', function() { log('🌐 Serveur port ' + PORT); });
     }
     if (state.status !== 'waiting_code') return;
 
-    // Récupérer le code email
-    log('📬 Attente code email...');
-    let code = await getCodeFromMail();
-
-    if (!code) {
-        log('⏳ Attente code manuel (5 min)...');
-        const start = Date.now();
-        while (!state.confirmCode && (Date.now() - start) < 300000) {
-            await sleep(2000);
-        }
-        code = state.confirmCode;
-    }
-
-    if (code) {
-        log('🔑 Soumission code : ' + code);
-        try {
-            const { csrf, cookieStr } = await getCsrfAndCookie();
-            const res = await fetch('https://www.instagram.com/api/v1/accounts/confirm_email/', {
-                method : 'POST',
-                headers: igHeaders({ 'X-CSRFToken': csrf, 'Cookie': cookieStr }),
-                body   : encode({ code: code, email: state.email })
-            });
-            const data = await res.json();
-            log('   Confirmation : ' + JSON.stringify(data).substring(0, 100));
-        } catch(e) { log('⚠️ Confirmation : ' + e.message); }
+    // Le flow complet (dry run → send_verify → attendre code → check_code → création finale)
+    // est géré dans createIgAccount() — ici on attend juste que /create finisse
+    while (state.status === 'waiting_code') {
+        await sleep(2000);
     }
 
     state.status = 'done';
