@@ -1,75 +1,58 @@
-const { By, until } = require('selenium-webdriver');
+const fetch = require('node-fetch');
 
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const API_BASE = 'https://doux.gleeze.com/tempmail';
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Récupère le code Instagram depuis la boîte mail temporaire
+// Le token est stocké dans global._tempMailToken par createFakeMail.js
 const getInstCode = async function (domain, mailName, browser) {
+    const token = global._tempMailToken;
 
-    const MAIL_URL = 'https://email-fake.com/' + domain + '/' + mailName;
-    let code = "";
-
-    try {
-        console.log("📬 Ouverture du webmail : " + MAIL_URL);
-
-        // Ouvrir un nouvel onglet
-        await browser.executeScript('window.open("");');
-        await sleep(1500);
-
-        const tabs = await browser.getAllWindowHandles();
-        await browser.switchTo().window(tabs[tabs.length - 1]);
-        await browser.get(MAIL_URL);
-        await sleep(12000); // Attendre l'arrivée de l'email
-
-        // Essai 1 : XPath original
-        try {
-            let emailTitle = await browser.findElement(
-                By.xpath("//*[@id='email-table']/div[2]/div[1]/div/h1")
-            ).getText();
-            console.log("📨 Email reçu : " + emailTitle);
-            code = emailTitle.replace("is your Instagram code", "").trim();
-        } catch (e) { /* Essai suivant */ }
-
-        // Essai 2 : chercher un nombre à 6 chiffres dans la page
-        if (!code || code.length < 4) {
-            try {
-                let pageText = await browser.findElement(By.tagName("body")).getText();
-                let match = pageText.match(/\b(\d{6})\b/);
-                if (match) {
-                    code = match[1];
-                    console.log("📨 Code trouvé dans la page : " + code);
-                }
-            } catch (e) { /* Essai suivant */ }
-        }
-
-        // Essai 3 : cliquer sur le premier email et chercher le code
-        if (!code || code.length < 4) {
-            try {
-                let firstEmail = await browser.findElement(
-                    By.xpath("//div[contains(@class,'email') or contains(@id,'email')]//h2 | //tr[1] | //div[@class='mail-item'][1]")
-                );
-                await firstEmail.click();
-                await sleep(3000);
-
-                let bodyText = await browser.findElement(By.tagName("body")).getText();
-                let match = bodyText.match(/\b(\d{6})\b/);
-                if (match) {
-                    code = match[1];
-                    console.log("📨 Code trouvé après clic : " + code);
-                }
-            } catch (e) { /* Pas d'email */ }
-        }
-
-        // Retourner sur l'onglet principal
-        await browser.switchTo().window(tabs[0]);
-
-    } catch (error) {
-        console.log("❌ Erreur getInstCode : " + error.message);
-        try {
-            const tabs = await browser.getAllWindowHandles();
-            await browser.switchTo().window(tabs[0]);
-        } catch (e) {}
+    if (!token) {
+        console.log("❌ Pas de token disponible pour lire les emails");
+        return "";
     }
 
-    return code.trim();
+    console.log(`📬 Lecture inbox pour : ${global._tempMailEmail}`);
+
+    // Essayer jusqu'à 6 fois (attente de l'email Instagram)
+    for (let attempt = 1; attempt <= 6; attempt++) {
+        try {
+            const res  = await fetch(`${API_BASE}/inbox?token=${encodeURIComponent(token)}`, { timeout: 10000 });
+            const data = await res.json();
+
+            console.log(`   Tentative ${attempt} : ${data.answer ? data.answer.length : 0} email(s) reçu(s)`);
+
+            if (data.answer && data.answer.length > 0) {
+                for (let mail of data.answer) {
+                    const subject = mail.subject || "";
+                    console.log(`   Email : "${subject}"`);
+
+                    // Chercher un code à 6 chiffres dans le sujet
+                    const match = subject.match(/\b(\d{6})\b/);
+                    if (match) {
+                        console.log(`✅ Code trouvé dans le sujet : ${match[1]}`);
+                        return match[1];
+                    }
+
+                    // Chercher aussi dans l'intro
+                    const intro = mail.intro || "";
+                    const match2 = intro.match(/\b(\d{6})\b/);
+                    if (match2) {
+                        console.log(`✅ Code trouvé dans l'intro : ${match2[1]}`);
+                        return match2[1];
+                    }
+                }
+            }
+        } catch (e) {
+            console.log(`   Erreur tentative ${attempt} : ${e.message}`);
+        }
+
+        if (attempt < 6) await sleep(5000); // attendre 5s entre chaque tentative
+    }
+
+    console.log("⚠️ Aucun code trouvé après toutes les tentatives");
+    return "";
 };
 
 module.exports = { getInstCode };
