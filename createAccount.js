@@ -557,45 +557,39 @@ app.post('/inject-date-and-submit', async (req, res) => {
             }
 
             if (submitBtn) {
-                // Supprimer disabled
-                await browserRef.executeScript("arguments[0].removeAttribute('disabled'); arguments[0].removeAttribute('aria-disabled');", submitBtn);
-                // Scroller vers le bouton et attendre
-                await browserRef.executeScript("arguments[0].scrollIntoView({block:'end',behavior:'instant'});", submitBtn);
-                await sleep(800);
-                state.screenshot = await browserRef.takeScreenshot();
+                // Scroll en bas et récupérer les coordonnées du DIV Submit
+                await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
+                await sleep(600);
 
-                // Obtenir les coordonnées réelles du bouton
-                const rect = await browserRef.executeScript(
-                    "var r=arguments[0].getBoundingClientRect(); return {x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2), w:Math.round(r.width), h:Math.round(r.height)};",
-                    submitBtn
-                );
-                console.log(`   Bouton coords : ${JSON.stringify(rect)}`);
-
-                // Méthode 1 : Selenium Actions (clic physique aux coordonnées)
-                try {
-                    const { Builder, By: B, Key, until } = require('selenium-webdriver');
-                    await browserRef.actions().move({x: rect.x, y: rect.y}).click().perform();
-                    console.log(`   ✅ Clic Actions (${rect.x},${rect.y})`);
-                } catch(e1) {
-                    // Méthode 2 : Selenium click direct
-                    try {
-                        await submitBtn.click();
-                        console.log(`   ✅ Clic Selenium direct`);
-                    } catch(e2) {
-                        // Méthode 3 : JS click avec dispatchEvent
-                        await browserRef.executeScript(`
-                            var el = arguments[0];
-                            var x = arguments[1], y = arguments[2];
-                            el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, clientX:x, clientY:y, button:0}));
-                            el.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true, cancelable:true, clientX:x, clientY:y, button:0}));
-                            el.dispatchEvent(new MouseEvent('click',     {bubbles:true, cancelable:true, clientX:x, clientY:y, button:0}));
-                            el.click();
-                        `, submitBtn, rect.x, rect.y);
-                        console.log(`   ✅ Clic JS mousedown/up/click`);
+                const submitCoords = await browserRef.executeScript(`
+                    var btns = Array.from(document.querySelectorAll('[role="button"],button'));
+                    var btn = null;
+                    for (var b of btns) {
+                        var txt = b.textContent.trim();
+                        if (txt === 'Submit' || txt === 'Next') { btn = b; break; }
                     }
+                    if (!btn) {
+                        var maxArea = 0;
+                        for (var b of btns) {
+                            var r = b.getBoundingClientRect();
+                            var area = r.width * r.height;
+                            if (area > maxArea && r.width > 100 && !b.textContent.includes('already')) { maxArea = area; btn = b; }
+                        }
+                    }
+                    if (!btn) return null;
+                    var rect = btn.getBoundingClientRect();
+                    return { x: Math.round(rect.left + rect.width/2), y: Math.round(rect.top + rect.height/2), txt: btn.textContent.trim() };
+                `);
+
+                if (submitCoords) {
+                    state.screenshot = await browserRef.takeScreenshot();
+                    await browserRef.actions().move({x: submitCoords.x, y: submitCoords.y}).press().release().perform();
+                    console.log(`   ✅ Clic Actions (${submitCoords.x},${submitCoords.y}) sur "${submitCoords.txt}"`);
+                } else {
+                    console.log(`   Essai ${si+1} : coords introuvables`);
                 }
             } else {
-                console.log(`   Essai ${si+1} : aucun bouton trouvé`);
+                console.log(`   Essai ${si+1} : aucun element role=button trouvé`);
             }
 
             await sleep(3000);
@@ -686,28 +680,33 @@ app.post('/do-submit', async (req, res) => {
 
         if (!submitBtn) return res.json({ ok:false, msg:'❌ Bouton Submit introuvable. Boutons trouvés: ' + JSON.stringify(btnDebug.slice(0,5)) });
 
-        // Forcer le scroll vers le bouton
-        await browserRef.executeScript("arguments[0].removeAttribute('disabled'); arguments[0].scrollIntoView({block:'center', behavior:'instant'});", submitBtn);
-        await sleep(800);
-        state.screenshot = await browserRef.takeScreenshot();
+        // Scroll bas et obtenir les coordonnées du bouton Submit
+        await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
+        await sleep(600);
 
-        // Obtenir les coords et cliquer via JS pur (le plus fiable en headless)
-        const clickResult = await browserRef.executeScript(`
-            var btn = arguments[0];
-            btn.removeAttribute('disabled');
-            btn.removeAttribute('aria-disabled');
+        // Trouver le DIV Submit et ses coordonnées absolues dans la page
+        const btnCoords = await browserRef.executeScript(`
+            var btns = Array.from(document.querySelectorAll('[role="button"],button'));
+            var btn = null;
+            for (var b of btns) {
+                if (b.textContent.trim() === 'Submit' || b.textContent.trim() === 'Next') { btn = b; break; }
+            }
+            if (!btn) return null;
             var rect = btn.getBoundingClientRect();
-            var cx = rect.left + rect.width/2;
-            var cy = rect.top + rect.height/2;
-            // Simuler tous les events d'un vrai clic
-            ['mouseover','mouseenter','mousemove','mousedown','mouseup','click','pointerdown','pointerup','pointercancel'].forEach(function(type) {
-                btn.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0}));
-            });
-            btn.click();
-            return {txt: btn.textContent.trim(), x: Math.round(cx), y: Math.round(cy), disabled: !!btn.disabled};
-        `, submitBtn);
+            return {
+                x: Math.round(rect.left + rect.width/2),
+                y: Math.round(rect.top + rect.height/2),
+                txt: btn.textContent.trim()
+            };
+        `);
+        console.log(`   Coords Submit : ${JSON.stringify(btnCoords)}`);
 
-        console.log(`✅ do-submit clic : ${JSON.stringify(clickResult)}`);
+        if (!btnCoords) return res.json({ ok:false, msg:'❌ Bouton Submit DIV introuvable' });
+
+        // Cliquer via Selenium Actions aux coordonnées absolues (bypasse React)
+        await browserRef.actions().move({x: btnCoords.x, y: btnCoords.y}).press().release().perform();
+        console.log(`✅ do-submit Actions clic (${btnCoords.x},${btnCoords.y})`);
+        const clickResult = btnCoords;
         await sleep(4000);
         state.screenshot = await browserRef.takeScreenshot();
 
