@@ -11,7 +11,7 @@ const port = process.env.PORT || 10000;
 app.get('/', (req, res) => {
     if (fs.existsSync('error_screenshot.png')) {
         res.send('<h1>Aperçu du Bot</h1><img src="/debug-image" style="width:100%;max-width:500px;">');
-    } else { res.send('Bot actif - En attente du formulaire...'); }
+    } else { res.send('Bot en cours de remplissage...'); }
 });
 app.get('/debug-image', (req, res) => { res.sendFile(path.join(process.cwd(), 'error_screenshot.png')); });
 app.listen(port, '0.0.0.0');
@@ -24,13 +24,13 @@ async function getFakeMail() {
         const body = await response.text();
         const $ = cheerio.load(body);
         return $("#email_ch_text").text().trim();
-    } catch (e) { return "alan" + Math.floor(Math.random()*9999) + "@btcmod.com"; }
+    } catch (e) { return "alan" + Math.floor(Math.random()*9999) + "@mailhvd.lat"; }
 }
 
 async function humanType(element, text) {
     for (let char of text) {
         await element.sendKeys(char);
-        await sleep(Math.random() * 80 + 40);
+        await sleep(Math.random() * 60 + 30);
     }
 }
 
@@ -48,69 +48,63 @@ async function humanType(element, text) {
     let browser = await new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(service).build();
 
     try {
-        console.log("Navigation initiale...");
+        console.log("Accès à Instagram...");
         await browser.get("https://www.instagram.com/accounts/signup/email/");
-        await sleep(8000);
+        await sleep(7000);
 
-        // --- ÉTAPE 1 : EMAIL (REBOUCLAGE SI ÉCHEC) ---
-        let emailInput;
-        try {
-            emailInput = await browser.wait(until.elementLocated(By.xpath("//input[contains(@name,'emailOrPhone')] | //input[@type='text']")), 15000);
-            let mail = await getFakeMail();
-            console.log("Saisie Email : " + mail);
-            await emailInput.click();
-            await humanType(emailInput, mail);
-        } catch (e) {
-            console.log("Rafraîchissement car champ email non trouvé...");
-            await browser.navigate().refresh();
-            await sleep(5000);
-            emailInput = await browser.wait(until.elementLocated(By.name("emailOrPhone")), 10000);
-            await emailInput.sendKeys(await getFakeMail());
-        }
-
-        // --- ÉTAPE 2 : LE PASSWORD (POINT CRITIQUE) ---
-        console.log("Recherche Password...");
-        // On clique sur le titre pour valider l'email
-        await browser.executeScript("document.querySelector('h2').click();");
+        // --- 1. EMAIL ---
+        console.log("Recherche Email...");
+        let emailInput = await browser.wait(until.elementLocated(By.xpath("//input[contains(@name,'emailOrPhone')] | //input[@type='text']")), 15000);
+        let mail = await getFakeMail();
+        console.log("Saisie : " + mail);
+        await emailInput.click();
+        await humanType(emailInput, mail);
+        
+        // --- 2. TRANSITION (L'ASTUCE DU TAB) ---
+        console.log("Passage au champ suivant...");
+        await emailInput.sendKeys(Key.TAB); // Simule la touche Tabulation
         await sleep(2000);
 
-        let passInput = await browser.wait(until.elementLocated(By.name("password")), 15000);
+        // --- 3. PASSWORD ---
+        console.log("Recherche Password...");
+        // On cherche par name ou par type password
+        let passInput = await browser.wait(until.elementLocated(By.xpath("//input[@name='password'] | //input[@type='password']")), 15000);
         await passInput.click();
         await humanType(passInput, "Azerty12345!");
+        await sleep(1000);
 
-        // --- ÉTAPE 3 : DATE ---
+        // --- 4. DATE ---
         console.log("Saisie Date...");
         let selects = await browser.findElements(By.tagName("select"));
         if(selects.length >= 3) {
             await selects[0].sendKeys("March");
-            await sleep(500);
-            await selects[1].sendKeys("10");
-            await sleep(500);
-            await selects[2].sendKeys("1998");
+            await selects[1].sendKeys("15");
+            await selects[2].sendKeys("1996");
         }
+        await sleep(1500);
 
-        // --- ÉTAPE 4 : NOM & USER ---
+        // --- 5. NOM & USER ---
         console.log("Saisie Identité...");
         let nameInput = await browser.wait(until.elementLocated(By.name("fullName")), 10000);
         await humanType(nameInput, "Alan Azad");
 
         let userInput = await browser.wait(until.elementLocated(By.name("username")), 10000);
-        await humanType(userInput, "azad_alan_" + Math.floor(Math.random()*9999));
+        await humanType(userInput, "azad_bot_" + Math.floor(Math.random()*99999));
 
         // Screenshot final
         await sleep(3000);
-        let pic = await browser.takeScreenshot();
-        fs.writeFileSync('error_screenshot.png', pic, 'base64');
+        let finalImg = await browser.takeScreenshot();
+        fs.writeFileSync('error_screenshot.png', finalImg, 'base64');
 
-        // --- ÉTAPE 5 : SUBMIT ---
-        let btn = await browser.wait(until.elementLocated(By.xpath("//button[@type='submit']")), 10000);
-        await btn.click();
-        console.log("Bouton cliqué !");
+        // --- 6. VALIDATION ---
+        let submitBtn = await browser.wait(until.elementLocated(By.xpath("//button[@type='submit']")), 10000);
+        await submitBtn.click();
+        console.log("Succès : Formulaire envoyé !");
 
     } catch (e) {
-        console.error("ERREUR GÉNÉRALE : " + e.message);
-        let img = await browser.takeScreenshot();
-        fs.writeFileSync('error_screenshot.png', img, 'base64');
+        console.error("ERREUR : " + e.message);
+        let errImg = await browser.takeScreenshot();
+        fs.writeFileSync('error_screenshot.png', errImg, 'base64');
     } finally {
         await sleep(20000);
         await browser.quit();
