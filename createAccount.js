@@ -163,78 +163,103 @@ async function selectOption(browser, selectElement, value) {
         await browser.executeScript("arguments[0].focus();", passInput);
         await sleep(300);
         await humanType(passInput, "Azerty12345!");
-        await sleep(1000);
+        await sleep(500);
+
+        // ✅ CLÉ : simuler blur sur password pour déclencher l'apparition des selects de date
+        await browser.executeScript("arguments[0].blur();", passInput);
+        await sleep(500);
+        // Cliquer ailleurs sur la page pour forcer le rendu React
+        await browser.executeScript("document.body.click();");
+        await sleep(2000);
         console.log("✅ Mot de passe saisi");
 
         // ── ÉTAPE 5 : Date de naissance ───────────────────────────────────────
         console.log("🎂 Saisie de la date de naissance...");
-        await sleep(1500);
 
+        // Attendre que les 3 selects apparaissent (avec scroll pour les rendre visibles)
         let selects = [];
         let attempts = 0;
-        while (selects.length < 3 && attempts < 5) {
+        while (selects.length < 3 && attempts < 8) {
             selects = await browser.findElements(By.tagName("select"));
             console.log(`   Tentative ${attempts + 1} : ${selects.length} select(s) trouvé(s)`);
-            if (selects.length < 3) await sleep(2000);
+            if (selects.length < 3) {
+                // Essayer de scroller vers le bas pour déclencher le lazy render
+                await browser.executeScript("window.scrollBy(0, 200);");
+                await sleep(1500);
+                await browser.executeScript("window.scrollBy(0, -200);");
+                await sleep(500);
+            }
             attempts++;
         }
 
         if (selects.length >= 3) {
-            // Récupérer les options disponibles pour chaque select
-            let monthOptions = await browser.executeScript(`
-                return Array.from(arguments[0].options).map(o => ({v: o.value, t: o.text}));
-            `, selects[0]);
-            console.log("   Options mois disponibles :", JSON.stringify(monthOptions.slice(0,4)));
+            let monthOptions = await browser.executeScript(
+                `return Array.from(arguments[0].options).map(o => o.value + '|' + o.text);`,
+                selects[0]
+            );
+            console.log("   Options mois :", monthOptions.slice(0, 5).join(", "));
 
-            // Sélectionner Mois = Mars (chercher "3" ou "March" ou "03")
-            let monthSet = await selectOption(browser, selects[0], "3");
-            await sleep(800);
-
-            // Jour = 10
+            // Mois Mars = value "3" (ou "March" selon la langue)
+            await selectOption(browser, selects[0], "3");
+            await sleep(600);
             await selectOption(browser, selects[1], "10");
-            await sleep(800);
-
-            // Année = 1995
+            await sleep(600);
             await selectOption(browser, selects[2], "1995");
-            await sleep(800);
-
+            await sleep(600);
             console.log("✅ Date de naissance saisie !");
         } else {
             console.log("❌ Impossible de trouver les selects de date !");
         }
 
         await saveScreenshot(browser);
-        await sleep(1500);
+        await sleep(1000);
 
         // ── ÉTAPE 6 : Nom complet & Username ─────────────────────────────────
         console.log("👤 Saisie du nom et username...");
-        
-        const fullName = generatingName();
-        const userName = username();
-        console.log(`   Nom : ${fullName} | Username : ${userName}`);
 
-        // Trouver tous les inputs texte
+        const fullName = generatingName();
+        const uName = username();
+        console.log(`   Nom : ${fullName} | Username : ${uName}`);
+
+        // ✅ Fonction pour remplir un input React correctement (déclenche les événements natifs)
+        async function fillReactInput(browser, element, value) {
+            await browser.executeScript(`
+                var input = arguments[0];
+                var value = arguments[1];
+                var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                nativeSetter.call(input, value);
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+            `, element, value);
+            await sleep(300);
+        }
+
         let allInputs = await browser.findElements(By.tagName("input"));
 
         for (let input of allInputs) {
             let name = await input.getAttribute("name");
-            let type = await input.getAttribute("type");
 
             if (name === "fullName") {
-                await browser.executeScript("arguments[0].focus();", input);
+                await browser.executeScript("arguments[0].click();", input);
                 await sleep(300);
-                // Vider le champ d'abord
-                await browser.executeScript("arguments[0].value = '';", input);
-                await humanType(input, fullName);
+                await fillReactInput(browser, input, fullName);
+                // Taper un espace puis backspace pour forcer la validation React
+                await input.sendKeys(" ");
+                await sleep(100);
+                await input.sendKeys(Key.BACK_SPACE);
+                await sleep(300);
                 console.log("✅ Nom complet saisi : " + fullName);
             }
 
             if (name === "username") {
-                await browser.executeScript("arguments[0].focus();", input);
+                await browser.executeScript("arguments[0].click();", input);
                 await sleep(300);
-                await browser.executeScript("arguments[0].value = '';", input);
-                await humanType(input, userName);
-                console.log("✅ Username saisi : " + userName);
+                await fillReactInput(browser, input, uName);
+                await input.sendKeys(" ");
+                await sleep(100);
+                await input.sendKeys(Key.BACK_SPACE);
+                await sleep(300);
+                console.log("✅ Username saisi : " + uName);
             }
         }
 
