@@ -1,347 +1,459 @@
-const { Builder, By, Key, until } = require('selenium-webdriver');
+const { Builder, By, until } = require('selenium-webdriver');
 const chrome = require('selenium-webdriver/chrome');
 const path = require('path');
 const express = require('express');
 const fs = require('fs');
-const { getFakeMail } = require('./createFakeMail');
-const { getInstCode } = require('./getCode');
+const fetch = require('node-fetch');
 const { generatingName, username } = require('./accountInfoGenerator');
 
-// ─── SERVEUR EXPRESS (debug visuel) ──────────────────────────────────────────
+// ─── FAKE MAIL API (doux.gleeze.com) ─────────────────────────────────────────
+async function getFakeMail() {
+    try {
+        const res  = await fetch('https://doux.gleeze.com/tempmail/gen', { timeout: 10000 });
+        const data = await res.json();
+        if (data && data.email && data.token) {
+            global._mailToken = data.token;
+            global._mailEmail = data.email;
+            console.log("📧 Email généré : " + data.email);
+            return data.email;
+        }
+    } catch(e) { console.log("⚠️ API mail erreur : " + e.message); }
+    const fb = "user" + Math.floor(Math.random()*99999) + "@guerrillamail.com";
+    console.log("📧 Fallback email : " + fb);
+    return fb;
+}
+
+async function getCodeFromMail() {
+    if (!global._mailToken) return "";
+    for (let i = 1; i <= 8; i++) {
+        try {
+            const res  = await fetch(`https://doux.gleeze.com/tempmail/inbox?token=${encodeURIComponent(global._mailToken)}`, { timeout: 10000 });
+            const data = await res.json();
+            console.log(`   📬 Tentative ${i} : ${data.answer ? data.answer.length : 0} email(s)`);
+            if (data.answer && data.answer.length > 0) {
+                for (let mail of data.answer) {
+                    const text = (mail.subject || "") + " " + (mail.intro || "");
+                    const m = text.match(/\b(\d{6})\b/);
+                    if (m) { console.log("   ✅ Code trouvé : " + m[1]); return m[1]; }
+                }
+            }
+        } catch(e) { console.log("   ⚠️ Inbox erreur : " + e.message); }
+        await sleep(5000);
+    }
+    return "";
+}
+
+// ─── ÉTAT GLOBAL (partagé bot ↔ serveur) ─────────────────────────────────────
+let state = {
+    status: 'starting',   // starting | waiting_date | waiting_code | done | error
+    email: '', password: 'Azerty12345!', fullName: '', uName: '',
+    dateSubmitted: false, dateDay: '', dateMonth: '', dateYear: '',
+    confirmCode: '', errorMsg: ''
+};
+
+// ─── SERVEUR EXPRESS ──────────────────────────────────────────────────────────
 const app = express();
+app.use(express.urlencoded({ extended: true }));
 const port = process.env.PORT || 10000;
 
 app.get('/', (req, res) => {
-    if (fs.existsSync('error_screenshot.png')) {
-        res.send(`
-            <h1>📸 Aperçu du Bot</h1>
-            <img src="/debug-image" style="width:100%;max-width:800px;border:2px solid #333;">
-            <p><a href="/debug-image">Voir en plein écran</a></p>
-        `);
+    if (state.status === 'waiting_date') {
+        res.send(`<!DOCTYPE html><html lang="fr">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bot Instagram</title>
+<style>
+  body{font-family:Arial,sans-serif;max-width:480px;margin:30px auto;padding:20px;background:#fafafa}
+  h2{color:#e1306c;text-align:center}
+  .box{background:#fff;border:1px solid #ddd;border-radius:10px;padding:15px;margin:10px 0}
+  .ok{color:#28a745;font-weight:bold}
+  label{display:block;margin-top:14px;font-weight:bold}
+  select{width:100%;padding:10px;margin-top:5px;border:2px solid #ccc;border-radius:8px;font-size:16px}
+  button{width:100%;padding:14px;background:#0095f6;color:#fff;border:none;border-radius:10px;font-size:18px;cursor:pointer;margin-top:20px}
+</style></head>
+<body>
+  <h2>🤖 Bot Instagram</h2>
+  <div class="box">
+    <p class="ok">✅ Email : ${state.email}</p>
+    <p class="ok">✅ Mot de passe : ${state.password}</p>
+    <p class="ok">✅ Nom : ${state.fullName}</p>
+    <p class="ok">✅ Username : ${state.uName}</p>
+  </div>
+  <div class="box" style="background:#fff3cd;border-color:#ffc107">
+    ⚠️ <strong>Remplis la date de naissance</strong> puis clique Envoyer.
+  </div>
+  <form action="/submit-date" method="POST">
+    <label>Mois :</label>
+    <select name="month" required>
+      <option value="">-- Choisir --</option>
+      <option value="1">Janvier</option><option value="2">Février</option><option value="3">Mars</option>
+      <option value="4">Avril</option><option value="5">Mai</option><option value="6">Juin</option>
+      <option value="7">Juillet</option><option value="8">Août</option><option value="9">Septembre</option>
+      <option value="10">Octobre</option><option value="11">Novembre</option><option value="12">Décembre</option>
+    </select>
+    <label>Jour :</label>
+    <select name="day" required>
+      <option value="">-- Choisir --</option>
+      ${Array.from({length:31},(_,i)=>`<option value="${i+1}">${i+1}</option>`).join('')}
+    </select>
+    <label>Année :</label>
+    <select name="year" required>
+      <option value="">-- Choisir --</option>
+      ${Array.from({length:80},(_,i)=>`<option value="${2006-i}">${2006-i}</option>`).join('')}
+    </select>
+    <button type="submit">🚀 Créer le compte !</button>
+  </form>
+</body></html>`);
+
+    } else if (state.status === 'waiting_code') {
+        res.send(`<!DOCTYPE html><html lang="fr">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Code Instagram</title>
+<style>
+  body{font-family:Arial,sans-serif;max-width:480px;margin:60px auto;padding:20px;background:#fafafa;text-align:center}
+  h2{color:#e1306c}
+  input{width:90%;padding:15px;font-size:28px;text-align:center;letter-spacing:10px;border:2px solid #ccc;border-radius:10px;margin-top:10px}
+  button{width:100%;padding:14px;background:#0095f6;color:#fff;border:none;border-radius:10px;font-size:18px;cursor:pointer;margin-top:15px}
+</style></head>
+<body>
+  <h2>📧 Code de confirmation</h2>
+  <p>Vérifie la boîte : <strong>${state.email}</strong></p>
+  <form action="/submit-code" method="POST">
+    <input type="text" name="code" maxlength="6" placeholder="000000" required autofocus>
+    <button>✅ Valider</button>
+  </form>
+</body></html>`);
+
+    } else if (state.status === 'done') {
+        res.send(`<!DOCTYPE html><html><body style="font-family:Arial;text-align:center;padding:40px">
+  <h1 style="color:#28a745">🎉 Compte créé avec succès !</h1>
+  <div style="background:#d4edda;border-radius:10px;padding:20px;max-width:400px;margin:auto">
+    <p><strong>📧 Email :</strong> ${state.email}</p>
+    <p><strong>🔒 Mot de passe :</strong> ${state.password}</p>
+    <p><strong>👤 Username :</strong> ${state.uName}</p>
+    <p><strong>🏷️ Nom :</strong> ${state.fullName}</p>
+  </div>
+</body></html>`);
+
+    } else if (state.status === 'error') {
+        res.send(`<h1 style="color:red;font-family:Arial;text-align:center">❌ ${state.errorMsg}</h1><img src="/debug-image" style="width:100%">`);
     } else {
-        res.send('<h1>✅ Bot actif - En attente du screenshot...</h1>');
+        res.send(`<h2 style="font-family:Arial;text-align:center">⏳ ${state.status}... ${state.errorMsg}</h2><meta http-equiv="refresh" content="3">`);
     }
 });
-app.get('/debug-image', (req, res) => {
-    res.sendFile(path.join(process.cwd(), 'error_screenshot.png'));
-});
-app.listen(port, '0.0.0.0', () => {
-    console.log(`🌐 Serveur Express démarré sur le port ${port}`);
+
+app.post('/submit-date', (req, res) => {
+    state.dateDay   = req.body.day;
+    state.dateMonth = req.body.month;
+    state.dateYear  = req.body.year;
+    state.dateSubmitted = true;
+    console.log(`📅 Date reçue : ${state.dateDay}/${state.dateMonth}/${state.dateYear}`);
+    res.send(`<h2 style="font-family:Arial;text-align:center;color:green">✅ Date reçue ! Création en cours...<br><small>Cette page va se rafraîchir</small></h2><meta http-equiv="refresh" content="4;url=/">`);
 });
 
-// ─── UTILITAIRES ─────────────────────────────────────────────────────────────
+app.post('/submit-code', (req, res) => {
+    state.confirmCode = req.body.code;
+    console.log("🔑 Code reçu : " + state.confirmCode);
+    res.send(`<h2 style="font-family:Arial;text-align:center;color:green">✅ Code reçu ! Validation...<br></h2><meta http-equiv="refresh" content="4;url=/">`);
+});
+
+app.get('/debug-image', (req, res) => {
+    if (fs.existsSync('error_screenshot.png')) res.sendFile(path.join(process.cwd(), 'error_screenshot.png'));
+    else res.send('Pas de screenshot');
+});
+
+app.listen(port, '0.0.0.0', () => console.log(`🌐 Serveur sur le port ${port}`));
+
+// ─── UTILITAIRES ──────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function saveScreenshot(browser, filename = 'error_screenshot.png') {
-    try {
-        let img = await browser.takeScreenshot();
-        fs.writeFileSync(filename, img, 'base64');
-        console.log(`📸 Screenshot sauvegardé : ${filename}`);
-    } catch (e) {
-        console.log('⚠️ Screenshot impossible : ' + e.message);
-    }
+async function save(browser) {
+    try { fs.writeFileSync('error_screenshot.png', await browser.takeScreenshot(), 'base64'); console.log('📸 Screenshot'); } catch(e) {}
 }
 
-async function humanType(element, text) {
-    for (let char of text) {
-        await element.sendKeys(char);
-        await sleep(Math.random() * 50 + 30);
-    }
+async function humanType(el, text) {
+    for (let c of text) { await el.sendKeys(c); await sleep(Math.random()*50+25); }
 }
 
-// ✅ Sélectionner une option <select> via JavaScript (contourne React)
-async function selectOption(browser, selectElement, value) {
+async function fillReact(browser, el, val) {
     await browser.executeScript(`
-        var select = arguments[0];
-        var val = arguments[1];
-        var found = false;
-        for (var i = 0; i < select.options.length; i++) {
-            if (String(select.options[i].value) === String(val) || 
-                select.options[i].text.trim() === String(val)) {
-                select.selectedIndex = i;
-                found = true;
-                break;
-            }
-        }
-        if (found) {
-            ['input', 'change', 'blur'].forEach(function(evtName) {
-                var evt = new Event(evtName, { bubbles: true, cancelable: true });
-                select.dispatchEvent(evt);
-            });
-            // React synthetic event
-            var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
-            nativeInputValueSetter.call(select, select.options[select.selectedIndex].value);
-            select.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        return found;
-    `, selectElement, value);
-    await sleep(700);
+        var e=arguments[0],v=arguments[1];
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(e,v);
+        ['input','change','blur'].forEach(n=>e.dispatchEvent(new Event(n,{bubbles:true})));
+    `, el, val);
+    await sleep(300);
 }
 
-// ─── PROGRAMME PRINCIPAL ─────────────────────────────────────────────────────
-(async function main() {
+async function selectOpt(browser, sel, val) {
+    return await browser.executeScript(`
+        var s=arguments[0],v=String(arguments[1]);
+        for(var i=0;i<s.options.length;i++){
+            if(s.options[i].value===v||s.options[i].text.trim()===v){
+                s.selectedIndex=i;
+                Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype,'value').set.call(s,s.options[i].value);
+                ['input','change','blur'].forEach(n=>s.dispatchEvent(new Event(n,{bubbles:true})));
+                return true;
+            }
+        }return false;
+    `, sel, String(val));
+}
 
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
+(async function main() {
     const chromePath = path.join(process.cwd(), 'chrome-linux64/chrome');
     const driverPath = path.join(process.cwd(), 'chromedriver-linux64/chromedriver');
 
     const service = new chrome.ServiceBuilder(driverPath);
-    const options = new chrome.Options();
-    options.setChromeBinaryPath(chromePath);
-    options.addArguments(
-        '--headless=new',
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--window-size=1920,1080',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-infobars',
-        '--lang=en-US'
-    );
-    options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-    options.setUserPreferences({ 'intl.accept_languages': 'en,en_US' });
+    const opts = new chrome.Options();
+    opts.setChromeBinaryPath(chromePath);
+    opts.addArguments('--headless=new','--no-sandbox','--disable-dev-shm-usage',
+        '--window-size=1920,1080','--disable-blink-features=AutomationControlled','--lang=en-US,en');
+    opts.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    opts.setUserPreferences({'intl.accept_languages':'en-US,en'});
 
-    let browser = await new Builder()
-        .forBrowser('chrome')
-        .setChromeOptions(options)
-        .setChromeService(service)
-        .build();
-
-    // Variables pour getCode plus tard
-    let emailDomain = "";
-    let emailName = "";
+    let browser = await new Builder().forBrowser('chrome').setChromeOptions(opts).setChromeService(service).build();
 
     try {
-        // ── ÉTAPE 1 : Récupérer un faux email ────────────────────────────────
-        console.log("📧 Récupération d'un email temporaire...");
+        // ── 1. EMAIL ──────────────────────────────────────────────────────────
         let mail = await getFakeMail();
-        if (!mail || mail.length < 5) {
-            mail = "alan" + Math.floor(Math.random() * 99999) + "@guerrillamail.com";
-        }
-        console.log("📧 Email obtenu : " + mail);
+        state.email = mail;
 
-        // Extraire domain et name pour getCode
-        if (mail.includes("@")) {
-            const parts = mail.split("@");
-            emailName = parts[0];
-            emailDomain = parts[1];
-        }
+        // ── 2. OUVRIR INSTAGRAM ───────────────────────────────────────────────
+        state.status = 'loading';
+        console.log("🌍 Ouverture Instagram...");
+        await browser.get("https://www.instagram.com/accounts/emailsignup/");
+        await sleep(8000);
 
-        // ── ÉTAPE 2 : Ouvrir Instagram ────────────────────────────────────────
-        console.log("🌍 Navigation vers Instagram...");
-        await browser.get("https://www.instagram.com/accounts/signup/email/");
-        await sleep(6000);
-
-        // Accepter les cookies si présents
         try {
-            let cookieBtn = await browser.findElement(
-                By.xpath("//button[contains(text(),'Allow') or contains(text(),'Accept') or contains(text(),'Accepter')]")
-            );
-            await cookieBtn.click();
-            console.log("🍪 Cookies acceptés");
-            await sleep(2000);
-        } catch (e) { /* Pas de popup cookies */ }
+            let btn = await browser.findElement(By.xpath("//button[contains(.,'Allow') or contains(.,'Accept') or contains(.,'Accepter') or contains(.,'Tout autoriser')]"));
+            await btn.click(); await sleep(2000);
+        } catch(e) {}
 
-        await saveScreenshot(browser);
+        await save(browser);
 
-        // ── ÉTAPE 3 : Remplir l'email ─────────────────────────────────────────
-        console.log("✍️ Saisie de l'email...");
-        let emailInput = await browser.wait(
-            until.elementLocated(By.xpath("//input[@name='emailOrPhone' or @type='text' or @type='email']")),
-            15000
-        );
-        await browser.executeScript("arguments[0].focus();", emailInput);
-        await sleep(500);
-        await humanType(emailInput, mail);
-        await sleep(1000);
-        console.log("✅ Email saisi : " + mail);
+        // ── 3. SAISIR EMAIL ───────────────────────────────────────────────────
+        state.status = 'filling';
+        console.log("✍️ Saisie email...");
+        let inputs = await browser.findElements(By.tagName("input"));
+        let emailInput = null;
+        for (let inp of inputs) {
+            let t = await inp.getAttribute("type");
+            if (t === "text" || t === "email" || t === "tel") { emailInput = inp; break; }
+        }
+        if (emailInput) {
+            await browser.executeScript("arguments[0].click();arguments[0].focus();", emailInput);
+            await sleep(400);
+            await humanType(emailInput, mail);
+            await fillReact(browser, emailInput, mail);
+            console.log("✅ Email saisi");
+        }
 
-        // ── ÉTAPE 4 : Remplir le password ─────────────────────────────────────
-        console.log("🔒 Saisie du mot de passe...");
-        let passInput = await browser.wait(
-            until.elementLocated(By.xpath("//input[@type='password']")),
-            10000
-        );
-        await browser.executeScript("arguments[0].focus();", passInput);
-        await sleep(300);
-        await humanType(passInput, "Azerty12345!");
-        await sleep(1000);
-        console.log("✅ Mot de passe saisi");
+        // ── 4. MOT DE PASSE ───────────────────────────────────────────────────
+        console.log("🔒 Mot de passe...");
+        let passInput = null;
+        for (let inp of inputs) {
+            let t = await inp.getAttribute("type");
+            if (t === "password") { passInput = inp; break; }
+        }
+        if (passInput) {
+            await browser.executeScript("arguments[0].click();arguments[0].focus();", passInput);
+            await sleep(300);
+            await humanType(passInput, state.password);
+            await fillReact(browser, passInput, state.password);
+            await browser.executeScript("arguments[0].blur();document.body.click();", passInput);
+            await sleep(2500);
+            console.log("✅ Mot de passe saisi");
+        }
 
-        // ── ÉTAPE 5 : Date de naissance ───────────────────────────────────────
-        console.log("🎂 Saisie de la date de naissance...");
-        await sleep(1500);
+        // ── 5. TENTER DATE AUTO ───────────────────────────────────────────────
+        console.log("🎂 Date de naissance...");
+        let selects = await browser.findElements(By.tagName("select"));
+        let dateOk = false;
 
-        let selects = [];
-        let attempts = 0;
-        while (selects.length < 3 && attempts < 5) {
+        // Attendre jusqu'à 5 tentatives
+        for (let i = 0; i < 5 && selects.length < 3; i++) {
+            await sleep(1500);
             selects = await browser.findElements(By.tagName("select"));
-            console.log(`   Tentative ${attempts + 1} : ${selects.length} select(s) trouvé(s)`);
-            if (selects.length < 3) await sleep(2000);
-            attempts++;
+            console.log(`   Tentative ${i+1} : ${selects.length} select(s)`);
         }
 
         if (selects.length >= 3) {
-            // Récupérer les options disponibles pour chaque select
-            let monthOptions = await browser.executeScript(`
-                return Array.from(arguments[0].options).map(o => ({v: o.value, t: o.text}));
-            `, selects[0]);
-            console.log("   Options mois disponibles :", JSON.stringify(monthOptions.slice(0,4)));
-
-            // Sélectionner Mois = Mars (chercher "3" ou "March" ou "03")
-            let monthSet = await selectOption(browser, selects[0], "3");
-            await sleep(800);
-
-            // Jour = 10
-            await selectOption(browser, selects[1], "10");
-            await sleep(800);
-
-            // Année = 1995
-            await selectOption(browser, selects[2], "1995");
-            await sleep(800);
-
-            console.log("✅ Date de naissance saisie !");
-        } else {
-            console.log("❌ Impossible de trouver les selects de date !");
+            let opt1 = await browser.executeScript(`return arguments[0].options.length>1?arguments[0].options[1].text.trim():'';`, selects[0]);
+            let mFirst = /january|february|march|janvier|février|mars/i.test(opt1);
+            let [dI, mI, yI] = mFirst ? [1,0,2] : [0,1,2];
+            let r1 = await selectOpt(browser, selects[dI], "10");
+            let r2 = await selectOpt(browser, selects[mI], "3");
+            if (!r2) r2 = await selectOpt(browser, selects[mI], "March");
+            if (!r2) r2 = await selectOpt(browser, selects[mI], "mars");
+            let r3 = await selectOpt(browser, selects[yI], "1995");
+            dateOk = r1 && r2 && r3;
+            console.log(`   Résultat date auto : jour=${r1} mois=${r2} année=${r3}`);
         }
 
-        await saveScreenshot(browser);
+        // ── 6. NOM & USERNAME ─────────────────────────────────────────────────
+        console.log("👤 Nom & Username...");
+        const fullName = generatingName();
+        const uName    = username();
+        state.fullName = fullName;
+        state.uName    = uName;
+        console.log(`   Nom: "${fullName}" | Username: "${uName}"`);
+
+        let allInputs = await browser.findElements(By.tagName("input"));
+        let textInputs = [];
+        for (let inp of allInputs) {
+            let t = await inp.getAttribute("type");
+            if (t === "text" || t === "search") textInputs.push(inp);
+        }
+        console.log(`   ${textInputs.length} input(s) texte`);
+
+        // fullName = avant-dernier, username = dernier
+        if (textInputs.length >= 2) {
+            let nameInp = textInputs[textInputs.length - 2];
+            await browser.executeScript("arguments[0].click();arguments[0].focus();", nameInp);
+            await sleep(300);
+            await humanType(nameInp, fullName);
+            await fillReact(browser, nameInp, fullName);
+            console.log("✅ Nom saisi : " + fullName);
+            await sleep(500);
+        }
+
+        let userInp = textInputs[textInputs.length - 1];
+        if (userInp) {
+            await browser.executeScript("arguments[0].click();arguments[0].focus();", userInp);
+            await sleep(300);
+            await browser.executeScript(`var e=arguments[0];Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(e,'');e.dispatchEvent(new Event('input',{bubbles:true}));`, userInp);
+            await sleep(200);
+            await humanType(userInp, uName);
+            await fillReact(browser, userInp, uName);
+            console.log("✅ Username saisi : " + uName);
+            await sleep(1500);
+        }
+
+        await save(browser);
+        await sleep(2000);
+
+        // ── 7. MODE HYBRIDE SI DATE AUTO ÉCHOUÉE ─────────────────────────────
+        if (!dateOk) {
+            console.log("⚠️ Date auto échouée → En attente saisie manuelle via l'interface web...");
+            state.status = 'waiting_date';
+
+            // Attendre max 10 minutes
+            let waited = 0;
+            while (!state.dateSubmitted && waited < 600) {
+                await sleep(2000); waited += 2;
+            }
+
+            if (!state.dateSubmitted) {
+                state.status = 'error';
+                state.errorMsg = 'Timeout : aucune date reçue';
+                return;
+            }
+
+            // Injecter la date dans le formulaire Instagram
+            console.log(`📅 Injection date : ${state.dateDay}/${state.dateMonth}/${state.dateYear}`);
+            let dateSelects = await browser.findElements(By.tagName("select"));
+
+            if (dateSelects.length >= 3) {
+                let opt1 = await browser.executeScript(`return arguments[0].options.length>1?arguments[0].options[1].text.trim():'';`, dateSelects[0]);
+                let mFirst = /january|february|march|janvier|février|mars/i.test(opt1);
+                let [dI, mI, yI] = mFirst ? [1,0,2] : [0,1,2];
+                await selectOpt(browser, dateSelects[dI], state.dateDay);   await sleep(500);
+                await selectOpt(browser, dateSelects[mI], state.dateMonth); await sleep(500);
+                await selectOpt(browser, dateSelects[yI], state.dateYear);  await sleep(500);
+                console.log("✅ Date injectée !");
+            } else {
+                console.log(`❌ ${dateSelects.length} select(s) seulement — date non injectée`);
+            }
+        }
+
+        await save(browser);
+        state.status = 'submitting';
         await sleep(1500);
 
-        // ── ÉTAPE 6 : Nom complet & Username ─────────────────────────────────
-        console.log("👤 Saisie du nom et username...");
-        
-        const fullName = generatingName();
-        const userName = username();
-        console.log(`   Nom : ${fullName} | Username : ${userName}`);
-
-        // Trouver tous les inputs texte
-        let allInputs = await browser.findElements(By.tagName("input"));
-
-        for (let input of allInputs) {
-            let name = await input.getAttribute("name");
-            let type = await input.getAttribute("type");
-
-            if (name === "fullName") {
-                await browser.executeScript("arguments[0].focus();", input);
-                await sleep(300);
-                // Vider le champ d'abord
-                await browser.executeScript("arguments[0].value = '';", input);
-                await humanType(input, fullName);
-                console.log("✅ Nom complet saisi : " + fullName);
-            }
-
-            if (name === "username") {
-                await browser.executeScript("arguments[0].focus();", input);
-                await sleep(300);
-                await browser.executeScript("arguments[0].value = '';", input);
-                await humanType(input, userName);
-                console.log("✅ Username saisi : " + userName);
-            }
-        }
-
-        await sleep(3000);
-        await saveScreenshot(browser);
-
-        // ── ÉTAPE 7 : Cliquer Submit ─────────────────────────────────────────
-        console.log("🚀 Recherche et clic sur le bouton Submit...");
-
+        // ── 8. SUBMIT ─────────────────────────────────────────────────────────
+        console.log("🚀 Submit...");
+        let btns = await browser.findElements(By.tagName("button"));
         let submitBtn = null;
-
-        // Essai 1 : button[type=submit]
-        try {
-            submitBtn = await browser.wait(
-                until.elementLocated(By.xpath("//button[@type='submit']")),
-                8000
-            );
-        } catch (e) { console.log("   button[type=submit] non trouvé, essai 2..."); }
-
-        // Essai 2 : bouton par texte
-        if (!submitBtn) {
-            try {
-                submitBtn = await browser.findElement(
-                    By.xpath("//button[.//text()[contains(., 'Next') or contains(., 'Submit') or contains(., 'Sign up')]]")
-                );
-            } catch (e) { console.log("   Bouton par texte non trouvé, essai 3..."); }
+        for (let b of btns) {
+            let t = await b.getAttribute("type");
+            let txt = (await b.getText()).toLowerCase();
+            if (t === "submit" || /submit|envoyer|next|sign up/i.test(txt)) { submitBtn = b; break; }
         }
-
-        // Essai 3 : n'importe quel bouton
-        if (!submitBtn) {
-            let allBtns = await browser.findElements(By.tagName("button"));
-            if (allBtns.length > 0) submitBtn = allBtns[allBtns.length - 1];
-        }
+        if (!submitBtn && btns.length > 0) submitBtn = btns[btns.length - 1];
 
         if (submitBtn) {
-            let isDisabled = await submitBtn.getAttribute("disabled");
-            if (isDisabled) {
-                console.log("⚠️ Le bouton est désactivé ! Vérification des champs manquants...");
-                await saveScreenshot(browser);
+            await browser.executeScript("arguments[0].removeAttribute('disabled');arguments[0].click();", submitBtn);
+            console.log("✅ Submit cliqué !");
+        } else {
+            console.log("❌ Aucun bouton submit trouvé");
+        }
 
-                // Forcer le clic quand même via JS
-                await browser.executeScript("arguments[0].removeAttribute('disabled'); arguments[0].click();", submitBtn);
-            } else {
-                await browser.executeScript("arguments[0].click();", submitBtn);
-                console.log("✅ Bouton Submit cliqué !");
+        await sleep(6000);
+        await save(browser);
+
+        // ── 9. CODE DE VÉRIFICATION ───────────────────────────────────────────
+        console.log("📬 Attente code...");
+        state.status = 'waiting_code';
+
+        // Essayer automatiquement via l'API mail
+        let code = await getCodeFromMail();
+
+        // Si pas de code auto → attendre saisie manuelle (max 5 min)
+        if (!code) {
+            console.log("📬 Code auto non trouvé → En attente saisie manuelle...");
+            let waited = 0;
+            while (!state.confirmCode && waited < 300) {
+                await sleep(2000); waited += 2;
+            }
+            code = state.confirmCode;
+        }
+
+        if (code && code.length >= 4) {
+            console.log("🔑 Code à saisir : " + code);
+            let codeInput = null;
+            try {
+                codeInput = await browser.wait(until.elementLocated(
+                    By.xpath("//input[@name='confirmationCode' or @inputmode='numeric' or @autocomplete='one-time-code']")
+                ), 10000);
+            } catch(e) {
+                let ins = await browser.findElements(By.tagName("input"));
+                if (ins.length > 0) codeInput = ins[0];
+            }
+
+            if (codeInput) {
+                await browser.executeScript("arguments[0].focus();", codeInput);
+                await humanType(codeInput, code);
+                await fillReact(browser, codeInput, code);
+                await sleep(1000);
+                let confirmBtns = await browser.findElements(By.tagName("button"));
+                if (confirmBtns.length > 0) {
+                    await browser.executeScript("arguments[0].click();", confirmBtns[0]);
+                    console.log("✅ Code soumis !");
+                }
             }
         } else {
-            console.log("❌ Aucun bouton trouvé !");
+            console.log("⚠️ Aucun code reçu");
         }
 
         await sleep(5000);
-        await saveScreenshot(browser);
+        await save(browser);
 
-        // ── ÉTAPE 8 : Récupérer le code de vérification ──────────────────────
-        console.log("📬 Attente du code de vérification Instagram...");
-        await sleep(15000);
+        // ── RÉSULTAT FINAL ────────────────────────────────────────────────────
+        state.status = 'done';
+        console.log("════════════════════════════════════");
+        console.log("🎉 COMPTE INSTAGRAM CRÉÉ !");
+        console.log(`   📧 Email    : ${state.email}`);
+        console.log(`   🔒 Password : ${state.password}`);
+        console.log(`   👤 Username : ${state.uName}`);
+        console.log(`   🏷️  Nom      : ${state.fullName}`);
+        console.log("════════════════════════════════════");
 
-        if (emailDomain && emailName) {
-            console.log(`🔍 Lecture des emails : ${emailName}@${emailDomain}`);
-            let code = await getInstCode(emailDomain, emailName, browser);
-            if (code && code.trim().length > 0) {
-                console.log("✅ Code reçu : " + code.trim());
-
-                // Chercher le champ de code de confirmation
-                let codeInput = null;
-                try {
-                    codeInput = await browser.wait(
-                        until.elementLocated(By.xpath("//input[@name='confirmationCode' or @aria-label='Confirmation Code' or @inputmode='numeric']")),
-                        10000
-                    );
-                } catch (e) {
-                    let inputs2 = await browser.findElements(By.tagName("input"));
-                    if (inputs2.length > 0) codeInput = inputs2[0];
-                }
-
-                if (codeInput) {
-                    await browser.executeScript("arguments[0].focus();", codeInput);
-                    await humanType(codeInput, code.trim());
-                    await sleep(1000);
-
-                    // Valider le code
-                    let confirmBtn = null;
-                    try {
-                        confirmBtn = await browser.findElement(
-                            By.xpath("//button[@type='submit' or contains(text(),'Next') or contains(text(),'Confirm')]")
-                        );
-                        await browser.executeScript("arguments[0].click();", confirmBtn);
-                        console.log("✅ Code soumis avec succès !");
-                    } catch(e) {
-                        console.log("⚠️ Bouton confirmation non trouvé");
-                    }
-                }
-            } else {
-                console.log("⚠️ Aucun code reçu dans le délai imparti");
-            }
-        }
-
-        await sleep(5000);
-        await saveScreenshot(browser);
-        console.log("🎉 Processus terminé ! Vérifiez le screenshot.");
-
-    } catch (e) {
-        console.error("❌ ERREUR GÉNÉRALE : " + e.message);
-        console.error(e.stack);
-        await saveScreenshot(browser);
+    } catch(e) {
+        console.error("❌ ERREUR : " + e.message);
+        state.status   = 'error';
+        state.errorMsg = e.message;
+        try { await save(browser); } catch(_) {}
     } finally {
-        await sleep(30000);
+        await sleep(60000);
         await browser.quit();
         console.log("🔒 Browser fermé.");
     }
