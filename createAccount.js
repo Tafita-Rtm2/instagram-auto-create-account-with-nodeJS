@@ -410,59 +410,78 @@ app.post('/inject-date-and-submit', async (req, res) => {
 
         state.screenshot = await browserRef.takeScreenshot();
 
-        // Scroller vers le bas pour voir le bouton Submit
-        await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-        await sleep(500);
-
-        // Cliquer Submit — essayer plusieurs fois
+        // Trouver et cliquer le bouton Submit via ses coordonnées réelles
+        const { Actions } = require('selenium-webdriver');
         let submitOk = false;
+
         for (let si = 0; si < 5; si++) {
-            const submitRes = await browserRef.executeScript(`
+            // Récupérer les coordonnées du bouton Submit
+            const btnInfo = await browserRef.executeScript(`
                 var btns = Array.from(document.querySelectorAll('button'));
                 var btn = null;
-                // Chercher en priorité type=submit
                 for (var i = 0; i < btns.length; i++) {
                     var t = (btns[i].getAttribute('type')||'').toLowerCase();
-                    var txt = btns[i].textContent.trim().toLowerCase();
-                    if (t === 'submit' || txt === 'submit' || txt === 'next' || txt === 'sign up') { btn = btns[i]; break; }
+                    var txt = btns[i].textContent.trim();
+                    if (t === 'submit' || /^submit$/i.test(txt) || /^next$/i.test(txt) || /^sign up$/i.test(txt)) { btn = btns[i]; break; }
                 }
-                // Fallback : dernier bouton visible
                 if (!btn) {
                     for (var i = btns.length-1; i >= 0; i--) {
                         var r = btns[i].getBoundingClientRect();
-                        if (r.width > 50 && r.height > 30) { btn = btns[i]; break; }
+                        if (r.width > 100 && r.height > 30) { btn = btns[i]; break; }
                     }
                 }
-                if (btn) {
-                    btn.removeAttribute('disabled');
-                    btn.scrollIntoView({block:'center',behavior:'instant'});
-                    btn.click();
-                    btn.dispatchEvent(new MouseEvent('click',{bubbles:true}));
-                    return {txt: btn.textContent.trim(), type: btn.getAttribute('type'), disabled: btn.disabled};
-                }
-                return null;
+                if (!btn) return null;
+                btn.removeAttribute('disabled');
+                btn.scrollIntoView({block:'center', behavior:'instant'});
+                var rect = btn.getBoundingClientRect();
+                return {
+                    txt: btn.textContent.trim(),
+                    x: Math.round(rect.left + rect.width/2),
+                    y: Math.round(rect.top + rect.height/2),
+                    w: Math.round(rect.width),
+                    h: Math.round(rect.height)
+                };
             `);
-            console.log(`   Submit essai ${si+1} : ${JSON.stringify(submitRes)}`);
-            await sleep(2000);
-            // Vérifier si la page a changé (on n'est plus sur emailsignup)
+            console.log(`   Submit essai ${si+1} : ${JSON.stringify(btnInfo)}`);
+
+            if (btnInfo && btnInfo.x > 0) {
+                // Cliquer via Actions Selenium (clic physique sur les coordonnées)
+                await browserRef.executeScript(`
+                    var el = document.elementFromPoint(arguments[0], arguments[1]);
+                    if (el) {
+                        // Remonter jusqu'au bouton
+                        while (el && el.tagName !== 'BUTTON') el = el.parentElement;
+                        if (el) {
+                            el.removeAttribute('disabled');
+                            el.click();
+                            el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, clientX:arguments[0], clientY:arguments[1]}));
+                            el.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, clientX:arguments[0], clientY:arguments[1]}));
+                            el.dispatchEvent(new PointerEvent('pointerup', {bubbles:true, clientX:arguments[0], clientY:arguments[1]}));
+                        }
+                    }
+                `, btnInfo.x, btnInfo.y);
+                console.log(`   Clic physique à (${btnInfo.x}, ${btnInfo.y})`);
+            }
+
+            await sleep(3000);
             const url = await browserRef.getCurrentUrl();
-            console.log(`   URL après submit : ${url}`);
+            console.log(`   URL : ${url}`);
             state.screenshot = await browserRef.takeScreenshot();
-            if (!url.includes('emailsignup') && !url.includes('accounts/emailsignup')) {
+
+            if (!url.includes('emailsignup')) {
                 submitOk = true;
-                console.log("✅ Page changée — Submit réussi !");
+                console.log("✅ Page changée !");
                 break;
             }
-            // Aussi vérifier si un champ de code est apparu
             const codeField = await browserRef.executeScript(`
                 return !!document.querySelector('input[name="confirmationCode"],input[inputmode="numeric"],input[autocomplete="one-time-code"]');
             `);
             if (codeField) { submitOk = true; console.log("✅ Champ code apparu !"); break; }
+            await sleep(1000);
         }
 
         state.status = 'waiting_code';
-        state.status = 'waiting_code';
-        res.json({ ok:true, msg: submitOk ? '✅ Date injectée — Compte créé !' : '⚠️ Submit envoyé — vérifie le screenshot' });
+        res.json({ ok:true, msg: submitOk ? '✅ Compte soumis avec succes !' : '⚠️ Submit envoye — verifie le screenshot' });
 
     } catch(e) {
         console.error("❌ inject : " + e.message);
