@@ -190,6 +190,79 @@ app.get('/', (req, res) => {
   </script>
 </body></html>`);
 
+    // ── Page bouton Submit ───────────────────────────────────────────────────
+    } else if (state.status === 'ready_for_submit') {
+        res.send(`<!DOCTYPE html><html lang="fr">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bot Instagram - Submit</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Arial,sans-serif;background:#f0f2f5;min-height:100vh}
+    .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:14px;text-align:center;font-size:17px;font-weight:bold}
+    .container{max-width:460px;margin:0 auto;padding:12px}
+    .card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+    .info-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:14px;border-bottom:1px solid #f0f0f0}
+    .info-row:last-child{border:none}
+    .info-label{color:#888;width:90px;flex-shrink:0}
+    .info-val{color:#222;font-weight:bold;word-break:break-all}
+    .btn{width:100%;padding:18px;background:linear-gradient(135deg,#28a745,#20c997);color:#fff;border:none;border-radius:12px;font-size:20px;font-weight:bold;cursor:pointer;margin-top:4px}
+    .btn:disabled{opacity:.5}
+    .status{text-align:center;font-size:14px;padding:8px;min-height:22px;border-radius:8px;margin-top:8px}
+    .status.ok{background:#d4edda;color:#155724}
+    .status.err{background:#f8d7da;color:#721c24}
+    .status.wait{background:#fff3cd;color:#856404}
+    .screenshot{width:100%;border-radius:10px;border:1px solid #eee;display:block}
+    .screen-label{font-size:12px;color:#888;text-align:center;margin:6px 0 4px}
+  </style>
+</head>
+<body>
+  <div class="header">🤖 Tout est prêt — Clique Submit !</div>
+  <div class="container">
+    <div class="card">
+      <div class="info-row"><span class="info-label">📧 Email</span><span class="info-val">${state.email}</span></div>
+      <div class="info-row"><span class="info-label">🔒 Password</span><span class="info-val">${state.password}</span></div>
+      <div class="info-row"><span class="info-label">🏷️ Nom</span><span class="info-val">${state.fullName}</span></div>
+      <div class="info-row"><span class="info-label">👤 Username</span><span class="info-val">${state.uName}</span></div>
+      <div class="info-row"><span class="info-label">🎂 Date</span><span class="info-val">${state.birthDate||'—'}</span></div>
+    </div>
+    <div class="card">
+      <button class="btn" id="btnSubmit" onclick="doSubmit()">🚀 Soumettre le formulaire !</button>
+      <div class="status wait" id="statusMsg">Formulaire prêt — clique pour créer le compte</div>
+    </div>
+    <div class="card">
+      <div class="screen-label">📸 Vue en direct</div>
+      <img id="liveImg" class="screenshot" src="/screenshot?t=0" alt="Instagram">
+    </div>
+  </div>
+  <script>
+    setInterval(() => { document.getElementById('liveImg').src = '/screenshot?t=' + Date.now(); }, 2000);
+    async function doSubmit() {
+      document.getElementById('btnSubmit').disabled = true;
+      const st = document.getElementById('statusMsg');
+      st.className = 'status wait';
+      st.textContent = '⏳ Clic Submit en cours...';
+      try {
+        const r = await fetch('/do-submit', {method:'POST', headers:{'Content-Type':'application/json'}});
+        const data = await r.json();
+        if (data.ok) {
+          st.className = 'status ok';
+          st.textContent = data.msg;
+          setTimeout(() => location.href = '/', 2000);
+        } else {
+          st.className = 'status err';
+          st.textContent = data.msg;
+          document.getElementById('btnSubmit').disabled = false;
+        }
+      } catch(e) {
+        st.className = 'status err';
+        st.textContent = '⚠️ Erreur réseau';
+        document.getElementById('btnSubmit').disabled = false;
+      }
+    }
+  </script>
+</body></html>`);
+
     // ── Code de confirmation ──────────────────────────────────────────────────
     } else if (state.status === 'waiting_code') {
         res.send(`<!DOCTYPE html><html lang="fr">
@@ -499,11 +572,80 @@ app.post('/inject-date-and-submit', async (req, res) => {
             } catch(e) {}
         }
 
-        state.status = 'waiting_code';
-        res.json({ ok:true, msg: submitOk ? '✅ Compte soumis !' : '⚠️ Submit envoye — verifie le screenshot' });
+        if (submitOk) {
+            state.status = 'waiting_code';
+            res.json({ ok:true, msg:'✅ Submit réussi ! En attente du code...' });
+        } else {
+            // Submit auto échoué → l'utilisateur clique manuellement
+            state.status = 'ready_for_submit';
+            res.json({ ok:true, msg:'⚠️ Clique sur "Soumettre" dans la prochaine page !' });
+        }
 
     } catch(e) {
         console.error("❌ inject : " + e.message);
+        res.json({ ok:false, msg:'❌ ' + e.message });
+    }
+});
+
+// Route /do-submit — clic manuel sur le bouton Submit Instagram
+app.post('/do-submit', async (req, res) => {
+    try {
+        if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
+
+        let clicked = false;
+        for (let si = 0; si < 5; si++) {
+            // Scroll en bas
+            await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
+            await sleep(600);
+
+            // Trouver bouton Submit
+            let submitBtn = null;
+            try { submitBtn = await browserRef.findElement(By.xpath("//button[@type='submit']")); } catch(e) {}
+            if (!submitBtn) {
+                try { submitBtn = await browserRef.findElement(By.xpath("//button[normalize-space(.)='Submit' or normalize-space(.)='Next']")); } catch(e) {}
+            }
+            if (!submitBtn) {
+                const btns = await browserRef.findElements(By.tagName('button'));
+                if (btns.length > 0) submitBtn = btns[btns.length - 1];
+            }
+
+            if (submitBtn) {
+                await browserRef.executeScript("arguments[0].removeAttribute('disabled'); arguments[0].scrollIntoView({block:'center',behavior:'instant'});", submitBtn);
+                await sleep(500);
+                // Clic via Actions (le plus fiable)
+                try {
+                    await browserRef.actions({async: true}).move({origin: submitBtn}).click().perform();
+                    console.log(`   ✅ do-submit Actions clic (essai ${si+1})`);
+                } catch(e) {
+                    await browserRef.executeScript("arguments[0].click();", submitBtn);
+                    console.log(`   ✅ do-submit JS clic (essai ${si+1})`);
+                }
+                clicked = true;
+                await sleep(3000);
+                state.screenshot = await browserRef.takeScreenshot();
+                const url = await browserRef.getCurrentUrl();
+                console.log(`   URL : ${url}`);
+                if (!url.includes('emailsignup')) {
+                    state.status = 'waiting_code';
+                    return res.json({ ok:true, msg:'✅ Compte soumis ! En attente du code...' });
+                }
+                // Vérifier champ code sur même page
+                try {
+                    await browserRef.findElement(By.xpath("//input[@inputmode='numeric' or @name='confirmationCode']"));
+                    state.status = 'waiting_code';
+                    return res.json({ ok:true, msg:'✅ Code demandé !' });
+                } catch(e) {}
+            }
+            await sleep(1000);
+        }
+        if (clicked) {
+            state.status = 'waiting_code';
+            res.json({ ok:true, msg:'⚠️ Submit cliqué — vérifie le screenshot' });
+        } else {
+            res.json({ ok:false, msg:'❌ Bouton Submit introuvable' });
+        }
+    } catch(e) {
+        console.error("❌ do-submit : " + e.message);
         res.json({ ok:false, msg:'❌ ' + e.message });
     }
 });
