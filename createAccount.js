@@ -264,6 +264,44 @@ app.get('/', (req, res) => {
 </body></html>`);
 
     // ── Code de confirmation ──────────────────────────────────────────────────
+    } else if (state.status === 'waiting_captcha') {
+        res.send(`<!DOCTYPE html><html lang="fr">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Captcha</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Arial;background:#f0f2f5}
+    .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:14px;text-align:center;font-size:17px;font-weight:bold}
+    .container{max-width:460px;margin:0 auto;padding:12px}
+    .card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+    .screenshot{width:100%;border-radius:10px;border:2px solid #e1306c}
+    .btn{width:100%;padding:14px;background:linear-gradient(135deg,#0095f6,#0074cc);color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:bold;cursor:pointer;margin-top:10px}
+    p{font-size:14px;color:#444;margin:6px 0;text-align:center}
+  </style>
+</head>
+<body>
+  <div class="header">🤖 Captcha détecté !</div>
+  <div class="container">
+    <div class="card">
+      <p>⚠️ Instagram demande une vérification.</p>
+      <p>Le captcha est visible dans le screenshot ci-dessous.<br>
+      <b>Coche "I'm not a robot"</b> si tu vois l'option, puis clique le bouton.</p>
+    </div>
+    <div class="card">
+      <img id="liveImg" class="screenshot" src="/screenshot?t=0">
+      <button class="btn" onclick="done()">✅ J'ai coché le captcha — Continuer</button>
+    </div>
+  </div>
+  <script>
+    setInterval(() => { document.getElementById('liveImg').src = '/screenshot?t=' + Date.now(); }, 2000);
+    async function done() {
+      await fetch('/captcha-done', {method:'POST'});
+      location.href = '/';
+    }
+  </script>
+</body></html>`);
+
     } else if (state.status === 'waiting_code') {
         res.send(`<!DOCTYPE html><html lang="fr">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -685,6 +723,21 @@ app.post('/do-submit', async (req, res) => {
             } catch(e) {}
         }
 
+        // Détecter si captcha apparu
+        const hasCaptcha = await browserRef.executeScript(`
+            return !!(document.querySelector('iframe[src*="recaptcha"]') ||
+                      document.querySelector('.g-recaptcha') ||
+                      document.querySelector('[title*="captcha" i]') ||
+                      document.querySelector('iframe[src*="captcha"]') ||
+                      (document.body.textContent.includes('not a robot') || document.body.textContent.includes('confirm it')));
+        `);
+        console.log(`   Captcha détecté : ${hasCaptcha}`);
+
+        if (hasCaptcha) {
+            state.status = 'waiting_captcha';
+            return res.json({ ok: true, msg: '🤖 Captcha détecté — coche "I am not a robot" dans le screenshot !' });
+        }
+
         state.status = 'waiting_code';
         res.json({ ok: true, msg: success ? '✅ Compte soumis !' : '⚠️ Submit cliqué — vérifie le screenshot' });
 
@@ -692,6 +745,33 @@ app.post('/do-submit', async (req, res) => {
         console.error("❌ do-submit : " + e.message);
         res.json({ ok:false, msg:'❌ ' + e.message });
     }
+});
+
+// Route captcha-done — l'utilisateur a coché le captcha
+app.post('/captcha-done', async (req, res) => {
+    console.log("✅ Captcha coché par l'utilisateur");
+    // Essayer de cliquer le bouton Next/Submit du captcha
+    try {
+        if (browserRef) {
+            await sleep(500);
+            // Cliquer le bouton Next dans la dialog captcha
+            const clicked = await browserRef.executeScript(`
+                var btns = Array.from(document.querySelectorAll('button,input[type="submit"]'));
+                for (var b of btns) {
+                    var txt = (b.textContent||b.value||'').trim().toLowerCase();
+                    if (txt === 'next' || txt === 'submit' || txt === 'continue' || txt === 'ok') {
+                        b.click(); return txt;
+                    }
+                }
+                return null;
+            `);
+            console.log("   Clic post-captcha : " + clicked);
+            await sleep(2000);
+            state.screenshot = await browserRef.takeScreenshot();
+        }
+    } catch(e) {}
+    state.status = 'waiting_code';
+    res.json({ ok: true });
 });
 
 // Code manuel
@@ -899,7 +979,7 @@ async function fillReact(browser, el, val) {
         if (state.status === 'ready_for_submit') {
             console.log("⏳ En attente du clic Submit manuel...");
             let ws = 0;
-            while (state.status === 'ready_for_submit' && ws < 600) { await sleep(2000); ws += 2; }
+            while ((state.status === 'ready_for_submit' || state.status === 'waiting_captcha') && ws < 600) { await sleep(2000); ws += 2; }
         }
 
         if (state.status !== 'waiting_code') {
@@ -907,7 +987,7 @@ async function fillReact(browser, el, val) {
             console.log("⚠️ Timeout date — passage en ready_for_submit");
             state.status = 'ready_for_submit';
             let ws2 = 0;
-            while (state.status === 'ready_for_submit' && ws2 < 600) { await sleep(2000); ws2 += 2; }
+            while ((state.status === 'ready_for_submit' || state.status === 'waiting_captcha') && ws2 < 600) { await sleep(2000); ws2 += 2; }
         }
 
         if (state.status !== 'waiting_code') {
