@@ -8,7 +8,7 @@ const sleep = (waitTimeInMs) => new Promise(resolve => setTimeout(resolve, waitT
 (async function fakeInstagramAccount() {
   let browser = await new Builder().forBrowser('chrome').build();
   try {
-    await browser.get("https://www.instagram.com/accounts/emailsignup/");
+    await browser.get("https://www.instagram.com/accounts/signup/email/");
     await sleep(5000);
     let fakeMail = await email.getFakeMail()
     await browser.findElement(By.name("emailOrPhone")).sendKeys(fakeMail, Key.RETURN);
