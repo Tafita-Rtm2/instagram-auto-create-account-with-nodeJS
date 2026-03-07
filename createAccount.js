@@ -30,7 +30,7 @@ async function getFakeMail() {
 async function humanType(element, text) {
     for (let char of text) {
         await element.sendKeys(char);
-        await sleep(Math.random() * 40 + 20);
+        await sleep(Math.random() * 50 + 30);
     }
 }
 
@@ -50,95 +50,76 @@ async function humanType(element, text) {
     try {
         console.log("Navigation vers Instagram...");
         await browser.get("https://www.instagram.com/accounts/signup/email/");
-        await sleep(8000); 
-
-        console.log("Recherche des champs du formulaire...");
-        let inputs = await browser.findElements(By.tagName("input"));
-        
-        if (inputs.length === 0) {
-            await browser.navigate().refresh();
-            await sleep(5000);
-            inputs = await browser.findElements(By.tagName("input"));
-        }
+        await sleep(10000); 
 
         // 1. EMAIL
+        console.log("Saisie Email...");
+        let emailField = await browser.wait(until.elementLocated(By.name("emailOrPhone")), 15000);
         let mail = await getFakeMail();
-        console.log("Saisie Email : " + mail);
-        await inputs[0].click();
-        await humanType(inputs[0], mail);
-        await sleep(1000);
+        await emailField.click();
+        await humanType(emailField, mail);
+        await sleep(2000);
 
         // 2. PASSWORD
         console.log("Saisie Password...");
-        let passInput = await browser.wait(until.elementLocated(By.xpath("//input[@type='password']")), 10000);
-        await passInput.click();
-        await humanType(passInput, "Azerty12345!");
-        await sleep(1000);
+        let passField = await browser.wait(until.elementLocated(By.name("password")), 10000);
+        await passField.click();
+        await humanType(passField, "Azerty12345!");
+        await sleep(2000);
 
-        // 3. DATE DE NAISSANCE (LA CORRECTION EST ICI)
-        console.log("Saisie Date de Naissance...");
-        let selects = await browser.wait(until.elementsLocated(By.tagName("select")), 10000);
+        // 3. DATE DE NAISSANCE (Correction majeure ici)
+        console.log("Recherche des menus de date...");
+        // On attend explicitement que les SELECT apparaissent
+        await browser.wait(until.elementLocated(By.tagName("select")), 15000);
+        let selects = await browser.findElements(By.tagName("select"));
         
         if(selects.length >= 3) {
-            // Mois
+            console.log("Menus trouvés ! Sélection en cours...");
+            // Mois (Mars)
             await selects[0].click();
-            await selects[0].sendKeys("March");
-            await selects[0].sendKeys(Key.ENTER);
-            await sleep(500);
+            await selects[0].sendKeys("March", Key.ENTER);
+            await sleep(800);
             
-            // Jour
+            // Jour (10)
             await selects[1].click();
-            await selects[1].sendKeys("10");
-            await selects[1].sendKeys(Key.ENTER);
-            await sleep(500);
+            await selects[1].sendKeys("10", Key.ENTER);
+            await sleep(800);
             
-            // Année
+            // Année (1995)
             await selects[2].click();
-            await selects[2].sendKeys("1995");
-            await selects[2].sendKeys(Key.ENTER);
-            console.log("Date enregistrée avec succès !");
-        } else {
-            console.log("ERREUR : Menus de date introuvables.");
+            await selects[2].sendKeys("1995", Key.ENTER);
         }
-        await sleep(2000);
+        await sleep(3000);
 
         // 4. NOM COMPLET & USERNAME
         console.log("Finalisation identité...");
-        let finalInputs = await browser.findElements(By.tagName("input"));
-        
-        for(let input of finalInputs) {
+        let inputs = await browser.findElements(By.tagName("input"));
+        for(let input of inputs) {
             let name = await input.getAttribute("name");
-            
             if(name === "fullName") {
-                console.log("Saisie du Nom Complet...");
-                await browser.executeScript("arguments[0].click();", input);
-                await sleep(500);
+                await input.click();
                 await humanType(input, "Alan Azad");
             }
-            
             if(name === "username") {
-                console.log("Saisie du Username...");
-                await browser.executeScript("arguments[0].click();", input);
-                await sleep(500);
+                await input.click();
                 await humanType(input, "azad_alan_" + Math.floor(Math.random()*9999));
             }
         }
 
-        // Capture d'écran pour vérifier que TOUT est rempli (Date incluse)
+        // Capture d'écran de contrôle
         await sleep(3000); 
         let pic = await browser.takeScreenshot();
         fs.writeFileSync('error_screenshot.png', pic, 'base64');
 
         // 5. VALIDATION
-        console.log("Recherche du bouton Submit...");
-        let submitBtn = await browser.wait(until.elementLocated(By.xpath("//button[@type='submit']")), 10000);
-        
-        // On clique via JavaScript pour contourner les blocages
+        console.log("Tentative de clic sur Submit...");
+        let submitBtn = await browser.wait(until.elementLocated(By.xpath("//button[@type='submit']")), 15000);
         await browser.executeScript("arguments[0].click();", submitBtn);
-        console.log("Formulaire envoyé avec succès !");
+        
+        console.log("Formulaire envoyé !");
 
     } catch (e) {
-        console.error("ERREUR GÉNÉRALE : " + e.message);
+        console.error("ERREUR : " + e.message);
         let img = await browser.takeScreenshot();
         fs.writeFileSync('error_screenshot.png', img, 'base64');
     } finally {
