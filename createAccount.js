@@ -274,108 +274,121 @@ app.get('/screenshot', (req, res) => {
 
 // ✅ Injection date + submit (avec scroll pour trouver le bouton)
 // ✅ Injection date via querySelector direct + React native setter
+// ✅ Injection date — essaie toutes les formes possibles
 app.post('/inject-date-and-submit', async (req, res) => {
     const { month, day, year } = req.body;
-    console.log(`📅 Injection date : jour=${day} mois=${month} année=${year}`);
+    const monthNum = parseInt(month);
+    // Toutes les formes possibles pour le mois
+    const monthForms = [
+        String(monthNum),
+        ['January','February','March','April','May','June','July','August','September','October','November','December'][monthNum-1],
+        ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'][monthNum-1],
+        ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][monthNum-1],
+    ];
+    console.log(`📅 Injection : jour=${day} mois=${month}(${monthForms[1]}) année=${year}`);
+
     try {
         if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
 
-        // Injecter la date via React sur TOUS les selects du DOM en une seule fois
+        // Tout faire en JS pur dans le navigateur
         const result = await browserRef.executeScript(`
-            var month = String(arguments[0]);
-            var day   = String(arguments[1]);
-            var year  = String(arguments[2]);
+            var monthForms = arguments[0]; // tableau de formes possibles
+            var day        = String(arguments[1]);
+            var year       = String(arguments[2]);
             var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
 
-            function setSelect(sel, val) {
-                // Essayer par value d'abord
-                for (var i = 0; i < sel.options.length; i++) {
-                    if (sel.options[i].value === val || sel.options[i].text.trim() === val) {
-                        nativeSetter.call(sel, sel.options[i].value);
-                        sel.dispatchEvent(new Event('input',  {bubbles:true}));
-                        sel.dispatchEvent(new Event('change', {bubbles:true}));
-                        sel.dispatchEvent(new Event('blur',   {bubbles:true}));
-                        return sel.options[i].text;
+            function trySet(sel, candidates) {
+                var opts = Array.from(sel.options);
+                for (var ci = 0; ci < candidates.length; ci++) {
+                    var v = String(candidates[ci]);
+                    for (var oi = 0; oi < opts.length; oi++) {
+                        if (opts[oi].value === v || opts[oi].text.trim() === v || opts[oi].text.trim().toLowerCase() === v.toLowerCase()) {
+                            nativeSetter.call(sel, opts[oi].value);
+                            ['input','change','blur'].forEach(function(n){ sel.dispatchEvent(new Event(n,{bubbles:true})); });
+                            return opts[oi].text.trim();
+                        }
                     }
                 }
-                return null;
+                // Log des options disponibles pour debug
+                return 'FAILED(opts:' + opts.slice(1,4).map(function(o){return o.text.trim();}).join(',') + ')';
             }
 
-            var selects = Array.from(document.querySelectorAll('select'));
-            if (selects.length === 0) return {ok:false, msg:'Aucun select trouvé'};
+            function dayForms(d)  { return [d, String(parseInt(d))]; }
+            function yearForms(y) { return [y, String(parseInt(y))]; }
 
-            var results = [];
-            // Instagram : 1er select = Month, 2ème = Day, 3ème = Year
-            // Mais parfois il y en a qu'un seul de visible. On force tous.
+            var selects = Array.from(document.querySelectorAll('select'));
+            var log = ['total='+selects.length];
+
+            if (selects.length === 0) return {ok:false, msg:'Aucun select dans le DOM'};
+
+            var mResult, dResult, yResult;
+
             if (selects.length >= 3) {
-                // Essayer de détecter l'ordre
-                var firstOpts = selects[0].options.length > 1 ? selects[0].options[1].text.trim() : '';
-                var monthFirst = /jan|feb|mar|jan|fév|mar/i.test(firstOpts);
+                // Détecter l'ordre : regarder les options du 1er select
+                var first3 = Array.from(selects[0].options).slice(1,3).map(function(o){return o.text.trim();}).join(',');
+                log.push('order_hint='+first3);
+                var monthFirst = /jan|fév|mar/i.test(first3);
                 var mI = monthFirst ? 0 : 1;
                 var dI = monthFirst ? 1 : 0;
                 var yI = 2;
-                results.push('month=' + setSelect(selects[mI], month));
-                results.push('day='   + setSelect(selects[dI], day));
-                results.push('year='  + setSelect(selects[yI], year));
+                mResult = trySet(selects[mI], monthForms);
+                dResult = trySet(selects[dI], dayForms(day));
+                yResult = trySet(selects[yI], yearForms(year));
             } else {
-                // Un seul select visible : probablement le Month.
-                // Essayer de forcer React à rendre les autres en changeant le premier
-                var r = setSelect(selects[0], month);
-                results.push('first=' + r);
-                // Attendre un tick React
-                await new Promise(function(resolve){ setTimeout(resolve, 500); });
-                // Re-chercher les selects
-                selects = Array.from(document.querySelectorAll('select'));
-                results.push('count_after=' + selects.length);
-                if (selects.length >= 2) {
-                    results.push('day='  + setSelect(selects[1], day));
+                // 1 seul select — c'est probablement le Month
+                mResult = trySet(selects[0], monthForms);
+                log.push('after_month='+mResult);
+                // Attendre React
+                var waitStart = Date.now();
+                while(Date.now()-waitStart < 2000) {
+                    selects = Array.from(document.querySelectorAll('select'));
+                    if(selects.length >= 3) break;
                 }
-                if (selects.length >= 3) {
-                    results.push('year=' + setSelect(selects[2], year));
-                }
+                log.push('after_wait='+selects.length);
+                dResult = selects.length >= 2 ? trySet(selects[1], dayForms(day))  : 'NO_SELECT';
+                yResult = selects.length >= 3 ? trySet(selects[2], yearForms(year)): 'NO_SELECT';
             }
-            return {ok:true, results: results, total: selects.length};
-        `, month, day, year);
 
-        console.log(`   Résultat JS : ${JSON.stringify(result)}`);
-        await sleep(500);
+            log.push('month='+mResult, 'day='+dResult, 'year='+yResult);
+            var allOk = !mResult.startsWith('FAILED') && !dResult.startsWith('FAILED') && !yResult.startsWith('FAILED')
+                        && mResult !== 'NO_SELECT' && dResult !== 'NO_SELECT' && yResult !== 'NO_SELECT';
+            return {ok: allOk, log: log, m:mResult, d:dResult, y:yResult};
+        `, monthForms, day, year);
+
+        console.log(`   Résultat : m="${result.m}" d="${result.d}" y="${result.y}"`);
+        console.log(`   Log : ${result.log.join(' | ')}`);
+        await sleep(800);
         state.screenshot = await browserRef.takeScreenshot();
 
-        if (!result || !result.ok) {
-            return res.json({ ok:false, msg: result ? result.msg : '❌ Erreur JS' });
+        if (!result.ok) {
+            return res.json({ ok:false, msg:`❌ Injection échouée — m=${result.m} d=${result.d} y=${result.y}` });
         }
 
-        // Cliquer Submit — chercher par type=submit ou texte, puis scrollIntoView
-        let submitClicked = await browserRef.executeScript(`
+        // Submit via JS pur avec scrollIntoView
+        const submitResult = await browserRef.executeScript(`
             var btns = Array.from(document.querySelectorAll('button'));
             var btn = null;
             for (var i = 0; i < btns.length; i++) {
-                var t = btns[i].getAttribute('type');
+                var t = (btns[i].getAttribute('type')||'').toLowerCase();
                 var txt = btns[i].textContent.trim().toLowerCase();
-                if (t === 'submit' || txt === 'submit' || txt === 'next' || txt === 'sign up') {
-                    btn = btns[i]; break;
-                }
+                if (t === 'submit' || txt === 'submit' || txt === 'next' || txt === 'sign up') { btn = btns[i]; break; }
             }
-            if (!btn && btns.length > 0) btn = btns[btns.length - 1];
+            if (!btn && btns.length > 0) btn = btns[btns.length-1];
             if (btn) {
                 btn.removeAttribute('disabled');
-                btn.scrollIntoView({block:'center', behavior:'instant'});
+                btn.scrollIntoView({block:'center',behavior:'instant'});
                 btn.click();
-                return btn.textContent.trim();
+                return {ok:true, txt: btn.textContent.trim()};
             }
-            return null;
+            return {ok:false, count: btns.length};
         `);
 
-        console.log(`   Submit cliqué : "${submitClicked}"`);
+        console.log(`   Submit : ${JSON.stringify(submitResult)}`);
         await sleep(3000);
         state.screenshot = await browserRef.takeScreenshot();
         state.status = 'waiting_code';
 
-        if (submitClicked) {
-            res.json({ ok:true, msg:`✅ Date injectée ! Submit cliqué ("${submitClicked}")` });
-        } else {
-            res.json({ ok:false, msg:'❌ Bouton Submit introuvable' });
-        }
+        res.json({ ok:true, msg:`✅ Date: ${result.m}/${result.d}/${result.y} — Submit cliqué !` });
 
     } catch(e) {
         console.error("❌ inject : " + e.message);
