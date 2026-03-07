@@ -1,1336 +1,502 @@
-const { Builder, By, until } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
-const path = require('path');
 const express = require('express');
-const fs = require('fs');
-const fetch = require('node-fetch');
+const fetch   = require('node-fetch');
 const { generatingName, username } = require('./accountInfoGenerator');
 
-// ─── FAKE MAIL API ────────────────────────────────────────────────────────────
+// ─── CONFIG ───────────────────────────────────────────────────────────────────
+const PASSWORD = 'Azerty12345!';
+const PORT     = process.env.PORT || 10000;
+const sleep    = ms => new Promise(r => setTimeout(r, ms));
+
+// ─── ÉTAT GLOBAL ──────────────────────────────────────────────────────────────
+let state = {
+    status: 'starting',  // starting | ready | creating | waiting_code | done | error
+    email: '', password: PASSWORD, fullName: '', uName: '',
+    token: '', confirmCode: '', errorMsg: '',
+    log: []
+};
+
+function log(msg) {
+    console.log(msg);
+    state.log.push(msg);
+    if (state.log.length > 40) state.log.shift();
+}
+
+// ─── TEMP MAIL ────────────────────────────────────────────────────────────────
 async function getFakeMail() {
     try {
         const res  = await fetch('https://doux.gleeze.com/tempmail/gen', { timeout: 10000 });
         const data = await res.json();
         if (data && data.email && data.token) {
-            global._mailToken = data.token;
-            global._mailEmail = data.email;
-            console.log("════════════════════════════════════════");
-            console.log("📧 EMAIL : " + data.email);
-            console.log("🔑 TOKEN : " + data.token);
-            console.log("════════════════════════════════════════");
+            state.token = data.token;
+            log('📧 Email  : ' + data.email);
+            log('🔑 Token  : ' + data.token);
             return data.email;
         }
-    } catch(e) { console.log("⚠️ API mail : " + e.message); }
-    const fb = "user" + Math.floor(Math.random()*99999) + "@guerrillamail.com";
-    console.log("📧 Fallback : " + fb);
+    } catch(e) { log('⚠️ Mail API : ' + e.message); }
+    const fb = 'user' + Math.floor(Math.random()*99999) + '@guerrillamail.com';
+    log('📧 Fallback : ' + fb);
     return fb;
 }
 
 async function getCodeFromMail() {
-    if (!global._mailToken) return "";
-    for (let i = 1; i <= 12; i++) {
+    if (!state.token) return '';
+    for (let i = 1; i <= 15; i++) {
         try {
-            const res  = await fetch(`https://doux.gleeze.com/tempmail/inbox?token=${encodeURIComponent(global._mailToken)}`, { timeout: 10000 });
+            const res  = await fetch('https://doux.gleeze.com/tempmail/inbox?token=' + encodeURIComponent(state.token), { timeout: 10000 });
             const data = await res.json();
-            console.log(`   📬 Tentative ${i} : ${data.answer ? data.answer.length : 0} email(s)`);
+            log('   📬 Tentative ' + i + ' : ' + (data.answer ? data.answer.length : 0) + ' email(s)');
             if (data.answer && data.answer.length > 0) {
                 for (let m of data.answer) {
-                    const txt = (m.subject||"") + " " + (m.intro||"");
+                    const txt   = (m.subject || '') + ' ' + (m.intro || '');
                     const match = txt.match(/\b(\d{6})\b/);
-                    if (match) { console.log("   ✅ Code : " + match[1]); return match[1]; }
+                    if (match) { log('   ✅ Code : ' + match[1]); return match[1]; }
                 }
             }
         } catch(e) {}
         await sleep(5000);
     }
-    return "";
+    return '';
 }
 
-// ─── ÉTAT GLOBAL ──────────────────────────────────────────────────────────────
-let state = {
-    status: 'starting',
-    email: '', password: 'Azerty12345!', fullName: '', uName: '', token: '',
-    screenshot: '',
-    confirmCode: ''
-};
-let browserRef = null;
-let liveLoopPaused = false;
+// ─── INSTAGRAM API ────────────────────────────────────────────────────────────
+function igHeaders(extra) {
+    const base = {
+        'User-Agent'      : 'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+        'Accept'          : '*/*',
+        'Accept-Language' : 'en-US,en;q=0.9',
+        'Origin'          : 'https://www.instagram.com',
+        'Referer'         : 'https://www.instagram.com/accounts/emailsignup/',
+        'X-IG-App-ID'     : '936619743392459',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Content-Type'    : 'application/x-www-form-urlencoded',
+    };
+    return Object.assign(base, extra || {});
+}
+
+function encode(obj) {
+    return Object.entries(obj)
+        .map(function(e) { return encodeURIComponent(e[0]) + '=' + encodeURIComponent(e[1]); })
+        .join('&');
+}
+
+// Récupérer le CSRF token depuis la page Instagram
+async function getCsrfAndCookie() {
+    try {
+        const res = await fetch('https://www.instagram.com/accounts/emailsignup/', {
+            headers: {
+                'User-Agent'     : 'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
+        });
+
+        // Extraire tous les cookies
+        const rawCookies = res.headers.raw()['set-cookie'] || [];
+        const cookieParts = rawCookies.map(function(c) { return c.split(';')[0]; });
+        const cookieStr   = cookieParts.join('; ');
+
+        // Extraire le csrftoken
+        let csrf = '';
+        for (const c of rawCookies) {
+            const m = c.match(/csrftoken=([^;]+)/);
+            if (m) { csrf = m[1]; break; }
+        }
+
+        // Fallback dans le HTML
+        if (!csrf) {
+            const html = await res.text();
+            const m2   = html.match(/"csrf_token"\s*:\s*"([^"]+)"/);
+            if (m2) csrf = m2[1];
+        }
+
+        log('   🔐 CSRF : ' + (csrf ? csrf.substring(0, 10) + '...' : 'non trouvé'));
+        return { csrf, cookieStr };
+    } catch(e) {
+        log('⚠️ getCsrf : ' + e.message);
+        return { csrf: '', cookieStr: '' };
+    }
+}
+
+// Créer le compte via l'API privée Instagram
+async function createIgAccount(csrf, cookieStr, month, day, year) {
+    const body = encode({
+        enc_password          : '#PWD_INSTAGRAM_BROWSER:0:' + Date.now() + ':' + state.password,
+        email                 : state.email,
+        username              : state.uName,
+        first_name            : state.fullName,
+        month                 : String(month),
+        day                   : String(day),
+        year                  : String(year),
+        client_id             : Math.random().toString(36).slice(2, 12),
+        seamless_login_enabled: '1',
+        tos_version           : 'row',
+        force_sign_in_page    : '0',
+    });
+
+    const res  = await fetch('https://www.instagram.com/api/v1/web/accounts/register/', {
+        method : 'POST',
+        headers: igHeaders({
+            'X-CSRFToken': csrf,
+            'Cookie'     : cookieStr || ('csrftoken=' + csrf),
+        }),
+        body   : body
+    });
+
+    const text = await res.text();
+    log('   📡 HTTP ' + res.status + ' : ' + text.substring(0, 200));
+
+    try { return JSON.parse(text); }
+    catch(e) { return { error: text }; }
+}
 
 // ─── SERVEUR EXPRESS ──────────────────────────────────────────────────────────
 const app = express();
-app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-const port = process.env.PORT || 10000;
+app.use(express.urlencoded({ extended: true }));
 
-app.get('/', (req, res) => {
+// ── Page principale ───────────────────────────────────────────────────────────
+app.get('/', function(req, res) {
+    const logHtml = state.log.slice(-15).reverse().map(function(l) {
+        return '<div class="ll">' + l.replace(/</g, '&lt;') + '</div>';
+    }).join('');
 
-    // ── Saisie de la date ─────────────────────────────────────────────────────
-    if (state.status === 'ready_for_date') {
-        res.send(`<!DOCTYPE html><html lang="fr">
+    if (state.status === 'ready') {
+        return res.send(`<!DOCTYPE html><html lang="fr">
 <head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Bot Instagram</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:Arial,sans-serif;background:#f0f2f5;min-height:100vh}
-    .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:14px;text-align:center;font-size:17px;font-weight:bold}
-    .container{max-width:460px;margin:0 auto;padding:12px}
+    body{font-family:Arial,sans-serif;background:#f0f2f5}
+    .hdr{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:14px;text-align:center;font-size:17px;font-weight:bold}
+    .wrap{max-width:460px;margin:0 auto;padding:12px}
     .card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
-    .info-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:14px;border-bottom:1px solid #f0f0f0}
-    .info-row:last-child{border:none}
-    .info-label{color:#888;width:90px;flex-shrink:0}
-    .info-val{color:#222;font-weight:bold;word-break:break-all}
-    .date-title{font-size:15px;font-weight:bold;color:#333;margin-bottom:12px}
-    .date-row{display:flex;gap:8px}
-    .date-col{flex:1;text-align:center}
-    .date-col label{display:block;font-size:11px;font-weight:bold;color:#888;margin-bottom:4px;text-transform:uppercase}
-    select{width:100%;padding:12px 4px;border:2px solid #e0e0e0;border-radius:10px;font-size:16px;background:#fff;text-align:center;cursor:pointer;transition:border-color .2s}
+    .row{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:14px;border-bottom:1px solid #f0f0f0}
+    .row:last-child{border:none}
+    .lbl{color:#888;width:75px;flex-shrink:0;font-size:12px}
+    .val{color:#222;font-weight:bold;word-break:break-all}
+    .ttl{font-size:15px;font-weight:bold;color:#333;margin-bottom:12px}
+    .dr{display:flex;gap:8px;margin-bottom:12px}
+    .dc{flex:1;text-align:center}
+    .dc label{display:block;font-size:10px;font-weight:bold;color:#888;margin-bottom:4px;text-transform:uppercase}
+    select{width:100%;padding:11px 2px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;background:#fff;text-align:center}
     select:focus{border-color:#e1306c;outline:none}
-    .btn{width:100%;padding:16px;background:linear-gradient(135deg,#0095f6,#0074cc);color:#fff;border:none;border-radius:12px;font-size:18px;font-weight:bold;cursor:pointer;margin-top:4px;transition:opacity .2s}
+    .btn{width:100%;padding:16px;background:linear-gradient(135deg,#0095f6,#0074cc);color:#fff;border:none;border-radius:12px;font-size:18px;font-weight:bold;cursor:pointer}
     .btn:disabled{opacity:.5}
-    .status{text-align:center;font-size:14px;padding:8px;min-height:22px;border-radius:8px;margin-top:8px}
-    .status.ok{background:#d4edda;color:#155724}
-    .status.err{background:#f8d7da;color:#721c24}
-    .status.wait{background:#fff3cd;color:#856404}
-    .screenshot{width:100%;border-radius:10px;border:1px solid #eee;display:block}
-    .screen-label{font-size:12px;color:#888;text-align:center;margin:6px 0 4px}
+    .st{text-align:center;font-size:14px;padding:8px;min-height:22px;border-radius:8px;margin-top:8px}
+    .ok{background:#d4edda;color:#155724}
+    .er{background:#f8d7da;color:#721c24}
+    .wa{background:#fff3cd;color:#856404}
+    .logs{background:#1a1a2e;border-radius:10px;padding:10px;max-height:150px;overflow-y:auto}
+    .ll{color:#00ff88;font-family:monospace;font-size:11px;padding:1px 0;border-bottom:1px solid #1e2a1e}
   </style>
 </head>
 <body>
-  <div class="header">🤖 Bot Instagram — Choisis la date</div>
-  <div class="container">
-
+  <div class="hdr">🤖 Bot Instagram — Sans Captcha</div>
+  <div class="wrap">
     <div class="card">
-      <div class="info-row"><span class="info-label">📧 Email</span><span class="info-val">${state.email}</span></div>
-      <div class="info-row"><span class="info-label">🔒 Password</span><span class="info-val">${state.password}</span></div>
-      <div class="info-row"><span class="info-label">🏷️ Nom</span><span class="info-val">${state.fullName}</span></div>
-      <div class="info-row"><span class="info-label">👤 Username</span><span class="info-val">${state.uName}</span></div>
+      <div class="row"><span class="lbl">📧 Email</span><span class="val">${state.email}</span></div>
+      <div class="row"><span class="lbl">🔒 Pass</span><span class="val">${state.password}</span></div>
+      <div class="row"><span class="lbl">🏷️ Nom</span><span class="val">${state.fullName}</span></div>
+      <div class="row"><span class="lbl">👤 User</span><span class="val">${state.uName}</span></div>
     </div>
-
     <div class="card">
-      <div class="date-title">🎂 Date de naissance</div>
-      <div class="date-row">
-        <div class="date-col">
+      <div class="ttl">🎂 Date de naissance</div>
+      <div class="dr">
+        <div class="dc">
           <label>Mois</label>
-          <select id="selMonth">
+          <select id="sM">
             <option value="">--</option>
-            <option value="1">Janvier</option><option value="2">Février</option>
-            <option value="3">Mars</option><option value="4">Avril</option>
-            <option value="5">Mai</option><option value="6">Juin</option>
-            <option value="7">Juillet</option><option value="8">Août</option>
-            <option value="9">Septembre</option><option value="10">Octobre</option>
-            <option value="11">Novembre</option><option value="12">Décembre</option>
+            ${['January','February','March','April','May','June','July','August','September','October','November','December'].map(function(m,i){return '<option value="'+(i+1)+'">'+m+'</option>';}).join('')}
           </select>
         </div>
-        <div class="date-col">
+        <div class="dc">
           <label>Jour</label>
-          <select id="selDay">
+          <select id="sD">
             <option value="">--</option>
-            ${Array.from({length:31},(_,i)=>`<option value="${i+1}">${i+1}</option>`).join('')}
+            ${Array.from({length:31},function(_,i){return '<option value="'+(i+1)+'">'+(i+1)+'</option>';}).join('')}
           </select>
         </div>
-        <div class="date-col">
+        <div class="dc">
           <label>Année</label>
-          <select id="selYear">
+          <select id="sY">
             <option value="">--</option>
-            ${Array.from({length:80},(_,i)=>`<option value="${2006-i}">${2006-i}</option>`).join('')}
+            ${Array.from({length:50},function(_,i){return '<option value="'+(2005-i)+'">'+(2005-i)+'</option>';}).join('')}
           </select>
         </div>
       </div>
-      <button class="btn" id="btnCreate" onclick="go()">🚀 Créer le compte !</button>
-      <div class="status wait" id="statusMsg">Choisis le mois, le jour et l'année</div>
+      <button class="btn" id="btn" onclick="go()">🚀 Créer le compte !</button>
+      <div class="st wa" id="st">Choisis la date de naissance</div>
     </div>
-
     <div class="card">
-      <div class="screen-label">📸 Vue en direct (rafraîchissement auto)</div>
-      <img id="liveImg" class="screenshot" src="/screenshot?t=0" alt="Instagram">
+      <div class="ttl" style="margin-bottom:8px">📋 Logs</div>
+      <div class="logs" id="logs">${logHtml}</div>
     </div>
   </div>
-
   <script>
-    // Rafraîchir screenshot toutes les 2s
-    setInterval(() => {
-      const img = document.getElementById('liveImg');
-      img.src = '/screenshot?t=' + Date.now();
-    }, 2000);
-
     async function go() {
-      const m = document.getElementById('selMonth').value;
-      const d = document.getElementById('selDay').value;
-      const y = document.getElementById('selYear').value;
-      const st = document.getElementById('statusMsg');
-      if (!m || !d || !y) {
-        st.className = 'status err';
-        st.textContent = '⚠️ Choisis le mois, le jour ET l\\'année !';
-        return;
-      }
-      document.getElementById('btnCreate').disabled = true;
-      st.className = 'status wait';
-      st.textContent = '⏳ Injection en cours...';
+      const m = document.getElementById('sM').value;
+      const d = document.getElementById('sD').value;
+      const y = document.getElementById('sY').value;
+      const st = document.getElementById('st');
+      if (!m||!d||!y) { st.className='st er'; st.textContent='⚠️ Choisis le mois, jour ET année !'; return; }
+      document.getElementById('btn').disabled = true;
+      st.className='st wa'; st.textContent='⏳ Création en cours...';
       try {
-        const r = await fetch('/inject-date-and-submit', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({month:m, day:d, year:y})
-        });
+        const r = await fetch('/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({month:m,day:d,year:y})});
         const data = await r.json();
-        if (data.ok) {
-          st.className = 'status ok';
-          st.textContent = data.msg;
-          setTimeout(() => location.href = '/', 2000);
-        } else {
-          st.className = 'status err';
-          st.textContent = data.msg;
-          document.getElementById('btnCreate').disabled = false;
-        }
-      } catch(e) {
-        st.className = 'status err';
-        st.textContent = '⚠️ Erreur réseau';
-        document.getElementById('btnCreate').disabled = false;
-      }
+        st.className = data.ok ? 'st ok' : 'st er';
+        st.textContent = data.msg;
+        if (data.ok) { setTimeout(()=>location.href='/',2000); }
+        else { document.getElementById('btn').disabled=false; }
+      } catch(e) { st.className='st er'; st.textContent='❌ Erreur réseau'; document.getElementById('btn').disabled=false; }
     }
+    // Refresh logs auto seulement si en cours de création
+    setInterval(function(){
+      if(document.getElementById('btn').disabled) location.reload();
+    }, 3000);
   </script>
 </body></html>`);
+    }
 
-    // ── Page bouton Submit ───────────────────────────────────────────────────
-    } else if (state.status === 'ready_for_submit') {
-        res.send(`<!DOCTYPE html><html lang="fr">
+    if (state.status === 'creating') {
+        return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="refresh" content="2"></head>
+<body style="font-family:Arial;text-align:center;padding:40px;background:#f0f2f5">
+  <h2 style="color:#0095f6">⏳ Création en cours...</h2>
+  <div style="background:#1a1a2e;border-radius:10px;padding:12px;margin-top:20px;max-width:400px;margin-left:auto;margin-right:auto;text-align:left">
+    ${logHtml}
+  </div>
+</body></html>`);
+    }
+
+    if (state.status === 'waiting_code') {
+        return res.send(`<!DOCTYPE html><html lang="fr">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Bot Instagram - Submit</title>
+  <title>Code Instagram</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:Arial,sans-serif;background:#f0f2f5;min-height:100vh}
-    .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:14px;text-align:center;font-size:17px;font-weight:bold}
-    .container{max-width:460px;margin:0 auto;padding:12px}
+    body{font-family:Arial;background:#f0f2f5}
+    .hdr{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:14px;text-align:center;font-size:17px;font-weight:bold}
+    .wrap{max-width:460px;margin:0 auto;padding:12px}
     .card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
-    .info-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:14px;border-bottom:1px solid #f0f0f0}
-    .info-row:last-child{border:none}
-    .info-label{color:#888;width:90px;flex-shrink:0}
-    .info-val{color:#222;font-weight:bold;word-break:break-all}
-    .btn{width:100%;padding:18px;background:linear-gradient(135deg,#28a745,#20c997);color:#fff;border:none;border-radius:12px;font-size:20px;font-weight:bold;cursor:pointer;margin-top:4px}
-    .btn:disabled{opacity:.5}
-    .status{text-align:center;font-size:14px;padding:8px;min-height:22px;border-radius:8px;margin-top:8px}
-    .status.ok{background:#d4edda;color:#155724}
-    .status.err{background:#f8d7da;color:#721c24}
-    .status.wait{background:#fff3cd;color:#856404}
-    .screenshot{width:100%;border-radius:10px;border:1px solid #eee;display:block}
-    .screen-label{font-size:12px;color:#888;text-align:center;margin:6px 0 4px}
+    .tok{background:#1a1a2e;color:#00ff88;border-radius:8px;padding:10px;font-family:monospace;font-size:11px;word-break:break-all;margin:8px 0}
+    input[type=number]{width:100%;padding:16px;font-size:28px;text-align:center;letter-spacing:8px;border:2px solid #e0e0e0;border-radius:10px;margin:10px 0;-moz-appearance:textfield}
+    input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none}
+    input:focus{border-color:#e1306c;outline:none}
+    .btn{width:100%;padding:14px;background:linear-gradient(135deg,#0095f6,#0074cc);color:#fff;border:none;border-radius:12px;font-size:17px;font-weight:bold;cursor:pointer}
+    p{margin:6px 0;font-size:14px;color:#444}
+    .logs{background:#1a1a2e;border-radius:10px;padding:10px;max-height:120px;overflow-y:auto}
+    .ll{color:#00ff88;font-family:monospace;font-size:11px;padding:1px 0}
   </style>
 </head>
 <body>
-  <div class="header">🤖 Tout est prêt — Clique Submit !</div>
-  <div class="container">
-    <div class="card">
-      <div class="info-row"><span class="info-label">📧 Email</span><span class="info-val">${state.email}</span></div>
-      <div class="info-row"><span class="info-label">🔒 Password</span><span class="info-val">${state.password}</span></div>
-      <div class="info-row"><span class="info-label">🏷️ Nom</span><span class="info-val">${state.fullName}</span></div>
-      <div class="info-row"><span class="info-label">👤 Username</span><span class="info-val">${state.uName}</span></div>
-      <div class="info-row"><span class="info-label">🎂 Date</span><span class="info-val">${state.birthDate||'—'}</span></div>
-    </div>
-    <div class="card">
-      <button class="btn" id="btnSubmit" onclick="doSubmit()">🚀 Soumettre le formulaire !</button>
-      <div class="status wait" id="statusMsg">Formulaire prêt — clique pour créer le compte</div>
-    </div>
-    <div class="card">
-      <div class="screen-label">📸 Vue en direct</div>
-      <img id="liveImg" class="screenshot" src="/screenshot?t=0" alt="Instagram">
-    </div>
-  </div>
-  <script>
-    setInterval(() => { document.getElementById('liveImg').src = '/screenshot?t=' + Date.now(); }, 2000);
-    async function doSubmit() {
-      document.getElementById('btnSubmit').disabled = true;
-      const st = document.getElementById('statusMsg');
-      st.className = 'status wait';
-      st.textContent = '⏳ Clic Submit en cours...';
-      try {
-        const r = await fetch('/do-submit', {method:'POST', headers:{'Content-Type':'application/json'}});
-        const data = await r.json();
-        if (data.ok) {
-          st.className = 'status ok';
-          st.textContent = data.msg;
-          setTimeout(() => location.href = '/', 2000);
-        } else {
-          st.className = 'status err';
-          st.textContent = data.msg;
-          document.getElementById('btnSubmit').disabled = false;
-        }
-      } catch(e) {
-        st.className = 'status err';
-        st.textContent = '⚠️ Erreur réseau';
-        document.getElementById('btnSubmit').disabled = false;
-      }
-    }
-  </script>
-</body></html>`);
-
-    // ── Page captcha ─────────────────────────────────────────────────────────
-    } else if (state.status === 'waiting_captcha') {
-        res.send(`<!DOCTYPE html><html lang="fr">
-<head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Captcha</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    html,body{height:100%;background:#111;color:#fff;font-family:Arial}
-    .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:10px;text-align:center;font-size:15px;font-weight:bold}
-    #msg{text-align:center;padding:6px 10px;font-size:13px;color:#ffcc00;background:#1a1a1a;min-height:28px}
-    .wrap{position:relative;width:100%;overflow:hidden;background:#000;touch-action:none;cursor:crosshair}
-    /* On affiche l'image en mode "zoom sur le captcha" — centré verticalement */
-    #liveImg{width:100%;display:block;object-fit:cover;object-position:center 38%}
-    #clickFlash{position:absolute;width:32px;height:32px;border-radius:50%;background:rgba(255,80,80,0.75);border:3px solid #fff;box-shadow:0 0 8px #f00;pointer-events:none;display:none;transform:translate(-50%,-50%);transition:opacity .4s}
-    .btns{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;padding:8px;background:#222}
-    .btn{padding:11px 4px;border:none;border-radius:10px;font-size:12px;font-weight:bold;cursor:pointer;color:#fff;line-height:1.3}
-    .btn-skip{background:linear-gradient(135deg,#6c757d,#495057)}
-    .btn-next{background:linear-gradient(135deg,#fd7e14,#e55a00)}
-    .btn-ok{background:linear-gradient(135deg,#28a745,#1a7a30)}
-    .tip{text-align:center;padding:6px;font-size:11px;color:#888;background:#111}
-  </style>
-</head>
-<body>
-  <div class="header">🤖 Captcha — Clique sur les cases !</div>
-  <div id="msg">👆 Clique sur chaque case demandée, puis ▶️ Next</div>
-  <div class="wrap" id="wrap">
-    <img id="liveImg" src="/screenshot?t=0" alt="Instagram">
-    <div id="clickFlash"></div>
-  </div>
-  <div class="btns">
-    <button class="btn btn-skip" onclick="clickSkip()">⏭️ SKIP</button>
-    <button class="btn btn-next" onclick="clickNext()">▶️ Next</button>
-    <button class="btn btn-ok" onclick="done()">✅ Créé !</button>
-  </div>
-  <div class="tip">🔄 Se rafraîchit automatiquement • Clic = transmis au navigateur</div>
-  <script>
-    const BROWSER_W = 1280, BROWSER_H = 900;
-    const msg = document.getElementById('msg');
-    const flash = document.getElementById('clickFlash');
-    const img = document.getElementById('liveImg');
-    const wrap = document.getElementById('wrap');
-
-    // Adapter la hauteur du wrap pour montrer la zone captcha
-    function fitWrap() {
-      const vw = window.innerWidth;
-      // Le captcha est approximativement dans la moitié centrale de l'écran 1280x900
-      // On affiche l'image à 100% largeur, donc height = 900/1280 * vw
-      const imgH = (900 / 1280) * vw;
-      wrap.style.height = Math.min(imgH, window.innerHeight - 160) + 'px';
-    }
-    fitWrap();
-    window.addEventListener('resize', fitWrap);
-
-    let refreshing = true;
-    const refreshLoop = setInterval(() => {
-      if (!refreshing) return;
-      img.src = '/screenshot?t=' + Date.now();
-    }, 1800);
-
-    // Clic sur l'image → transmis au navigateur headless
-    wrap.addEventListener('click', async function(e) {
-      const rect = img.getBoundingClientRect();
-      // Calculer les coordonnées réelles dans le navigateur (1280x900)
-      const scaleX = BROWSER_W / rect.width;
-      // L'image peut être croppée verticalement via object-fit, recalculer Y
-      const displayedImgH = rect.width * (BROWSER_H / BROWSER_W);
-      const offsetY = (rect.height - displayedImgH) / 2; // offset crop vertical
-      const rawY = e.clientY - rect.top;
-      const bx = Math.round((e.clientX - rect.left) * scaleX);
-      const by = Math.round((rawY - offsetY) * scaleX);
-
-      // Flash rouge
-      flash.style.left = (e.clientX - rect.left) + 'px';
-      flash.style.top  = (e.clientY - rect.top)  + 'px';
-      flash.style.display = 'block';
-      setTimeout(() => { flash.style.display = 'none'; }, 700);
-
-      msg.textContent = '⏳ Clic (' + bx + ',' + by + ')...';
-      refreshing = false;
-
-      try {
-        const r = await fetch('/remote-click', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({x:bx, y:by})
-        });
-        const d = await r.json();
-        msg.textContent = d.msg || '✅ Clic transmis';
-        if (d.status === 'waiting_code') { setTimeout(() => location.href='/', 1500); return; }
-      } catch(e) { msg.textContent = '❌ Erreur réseau'; }
-      setTimeout(() => { refreshing = true; }, 1500);
-    });
-
-    async function clickSkip() {
-      msg.textContent = '⏳ SKIP...';
-      // Clic sur le bouton SKIP du reCAPTCHA (coords approximatives)
-      await fetch('/remote-click', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({x:690, y:645})});
-      setTimeout(() => { refreshing = true; }, 1500);
-      msg.textContent = '✅ SKIP cliqué — attends...';
-    }
-    async function clickNext() {
-      msg.textContent = '⏳ Next...';
-      refreshing = false;
-      const r = await fetch('/captcha-next', {method:'POST'});
-      const d = await r.json();
-      msg.textContent = d.msg || '✅';
-      if (d.status === 'waiting_code') setTimeout(() => location.href='/', 1500);
-      else setTimeout(() => { refreshing = true; }, 1500);
-    }
-    async function done() {
-      await fetch('/captcha-done', {method:'POST'});
-      location.href = '/';
-    }
-  </script>
-</body></html>`);
-
-    } else if (state.status === 'waiting_code') {
-        res.send(`<!DOCTYPE html><html lang="fr">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Code Instagram</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:Arial;background:#f0f2f5;min-height:100vh}
-  .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:14px;text-align:center;font-size:17px;font-weight:bold}
-  .container{max-width:460px;margin:0 auto;padding:12px}
-  .card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
-  .token{background:#1a1a2e;color:#00ff88;border-radius:8px;padding:10px;font-family:monospace;font-size:10px;word-break:break-all;margin:10px 0}
-  input[type=number]{width:100%;padding:16px;font-size:28px;text-align:center;letter-spacing:10px;border:2px solid #e0e0e0;border-radius:10px;margin:10px 0;-moz-appearance:textfield}
-  input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none}
-  input:focus{border-color:#e1306c;outline:none}
-  .btn{width:100%;padding:14px;background:linear-gradient(135deg,#0095f6,#0074cc);color:#fff;border:none;border-radius:12px;font-size:17px;font-weight:bold;cursor:pointer}
-  .screenshot{width:100%;border-radius:10px;border:1px solid #eee}
-  p{margin:6px 0;font-size:14px;color:#444}
-</style></head>
-<body>
-  <div class="header">📧 Code de confirmation</div>
-  <div class="container">
+  <div class="hdr">📧 Code de confirmation</div>
+  <div class="wrap">
     <div class="card">
       <p>📧 Email : <strong>${state.email}</strong></p>
-      <p>Le bot récupère le code automatiquement.<br>Si rien dans 1 min, entre-le ici :</p>
-      <p style="margin-top:10px;font-size:13px;color:#888">🔑 Token pour accéder aux emails :</p>
-      <div class="token">${state.token}</div>
-      <code style="font-size:11px;color:#666;word-break:break-all">curl "https://doux.gleeze.com/tempmail/inbox?token=TOKEN_CI_DESSUS"</code>
+      <p style="margin-top:8px;color:#666;font-size:13px">Le bot récupère le code automatiquement.<br>Si rien dans 1 min, entre-le ici :</p>
+      <p style="margin-top:10px;font-size:12px;color:#888">🔑 Token :</p>
+      <div class="tok">${state.token}</div>
     </div>
     <div class="card">
-      <form action="/submit-code" method="POST">
-        <input type="number" name="code" placeholder="000000" autofocus>
-        <button class="btn">✅ Valider le code</button>
-      </form>
+      <p style="margin-bottom:6px;font-weight:bold">Code manuel :</p>
+      <input type="number" id="ci" placeholder="000000" autofocus>
+      <button class="btn" onclick="sendCode()">✅ Valider</button>
     </div>
-    <div class="card">
-      <img class="screenshot" src="/screenshot?t=${Date.now()}" alt="Instagram">
-    </div>
+    <div class="card"><div class="logs">${logHtml}</div></div>
   </div>
+  <script>
+    async function sendCode() {
+      const code = document.getElementById('ci').value;
+      await fetch('/submit-code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});
+      location.href='/';
+    }
+    setInterval(()=>location.reload(), 4000);
+  </script>
 </body></html>`);
+    }
 
-    // ── Succès ────────────────────────────────────────────────────────────────
-    } else if (state.status === 'done') {
-        res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-<body style="font-family:Arial;background:#f0f2f5;min-height:100vh">
-  <div style="background:linear-gradient(135deg,#28a745,#20c997);color:#fff;padding:20px;text-align:center;font-size:20px;font-weight:bold">
-    🎉 Compte Instagram créé !
-  </div>
+    if (state.status === 'done') {
+        return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+<body style="font-family:Arial;background:#f0f2f5">
+  <div style="background:linear-gradient(135deg,#28a745,#20c997);color:#fff;padding:20px;text-align:center;font-size:20px;font-weight:bold">🎉 Compte créé !</div>
   <div style="max-width:460px;margin:20px auto;padding:0 12px">
     <div style="background:#fff;border-radius:14px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.08)">
-      <p style="margin:8px 0;font-size:16px">📧 <b>Email :</b> <span style="color:#0095f6">${state.email}</span></p>
-      <p style="margin:8px 0;font-size:16px">🔒 <b>Mot de passe :</b> ${state.password}</p>
-      <p style="margin:8px 0;font-size:16px">👤 <b>Username :</b> @${state.uName}</p>
-      <p style="margin:8px 0;font-size:16px">🏷️ <b>Nom :</b> ${state.fullName}</p>
+      <p style="margin:10px 0;font-size:16px">📧 <b>Email :</b> <span style="color:#0095f6">${state.email}</span></p>
+      <p style="margin:10px 0;font-size:16px">🔒 <b>Pass :</b> ${state.password}</p>
+      <p style="margin:10px 0;font-size:16px">👤 <b>@${state.uName}</b></p>
+      <p style="margin:10px 0;font-size:16px">🏷️ <b>${state.fullName}</b></p>
     </div>
-    <p style="text-align:center;color:#666;margin-top:15px;font-size:14px">💾 Sauvegarde ces informations !</p>
+    <div style="background:#1a1a2e;border-radius:10px;padding:12px;margin-top:12px">
+      ${state.log.slice(-8).map(function(l){return '<div style="color:#00ff88;font-family:monospace;font-size:11px">'+l.replace(/</g,'&lt;')+'</div>';}).join('')}
+    </div>
+    <p style="text-align:center;color:#666;margin-top:15px;font-size:14px">💾 Sauvegarde ces infos !</p>
   </div>
 </body></html>`);
-
-    // ── Erreur ────────────────────────────────────────────────────────────────
-    } else if (state.status === 'error') {
-        res.send(`<body style="font-family:Arial;padding:20px"><h2 style="color:red">❌ ${state.errorMsg}</h2><img src="/screenshot" style="width:100%;border-radius:8px"></body>`);
-
-    // ── Chargement ────────────────────────────────────────────────────────────
-    } else {
-        res.send(`<body style="font-family:Arial;text-align:center;padding:60px;background:#f0f2f5">
-  <h2 style="color:#0095f6">⏳ ${state.status}...</h2>
-  <p style="color:#666;margin-top:10px">Le bot initialise le formulaire Instagram</p>
-  <meta http-equiv="refresh" content="2">
-</body>`);
     }
+
+    if (state.status === 'error') {
+        return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="refresh" content="8;url=/"></head>
+<body style="font-family:Arial;background:#f0f2f5;padding:20px">
+  <h2 style="color:red">❌ ${state.errorMsg}</h2>
+  <div style="background:#1a1a2e;border-radius:10px;padding:12px;margin-top:12px">${logHtml}</div>
+  <p style="color:#666;margin-top:10px;font-size:13px">Redirection dans 8s...</p>
+</body></html>`);
+    }
+
+    // Chargement
+    return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="refresh" content="2"></head>
+<body style="font-family:Arial;text-align:center;padding:60px;background:#f0f2f5">
+  <h2 style="color:#0095f6">⏳ Démarrage...</h2>
+  <div style="background:#1a1a2e;border-radius:10px;padding:12px;margin-top:20px;max-width:400px;margin-left:auto;margin-right:auto;text-align:left">${logHtml}</div>
+</body></html>`);
 });
 
-// Screenshot live
-app.get('/screenshot', (req, res) => {
-    if (state.screenshot) {
-        res.set('Content-Type','image/png');
-        res.set('Cache-Control','no-cache,no-store');
-        res.send(Buffer.from(state.screenshot, 'base64'));
-    } else { res.status(404).send(''); }
-});
+// ── POST /create ──────────────────────────────────────────────────────────────
+app.post('/create', async function(req, res) {
+    const month = parseInt(req.body.month);
+    const day   = parseInt(req.body.day);
+    const year  = parseInt(req.body.year);
 
-// ✅ Injection date + submit (avec scroll pour trouver le bouton)
-// ✅ Injection date via querySelector direct + React native setter
-// ✅ Injection date — essaie toutes les formes possibles
-// ✅ Injection date via clic sur les vrais dropdowns React Instagram
-// ✅ Injection date via clic Selenium sur les vrais composants React
-app.post('/inject-date-and-submit', async (req, res) => {
-    liveLoopPaused = true; // Pause screenshot pendant les actions critiques
-    const { month, day, year } = req.body;
-    const monthNum = parseInt(month);
-    const dayNum   = parseInt(day);
-    const yearNum  = parseInt(year);
-
-    const months_en = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-    const months_fr = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
-    const targetMonth = months_en[monthNum - 1];
-    const targetMonthFr = months_fr[monthNum - 1];
-
-    console.log(`📅 Clic date : ${targetMonth} ${dayNum} ${yearNum}`);
+    state.status = 'creating';
+    log('🎂 Date : ' + month + '/' + day + '/' + year);
 
     try {
-        if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
-
-        // Inspecter les dropdowns Birthday dans le DOM
-        const domInfo = await browserRef.executeScript(`
-            var combos = Array.from(document.querySelectorAll('[role="combobox"],[aria-label*="Month"],[aria-label*="Day"],[aria-label*="Year"],[aria-label*="Mois"],[aria-label*="Jour"],[aria-label*="Année"]'));
-            var tabEls = Array.from(document.querySelectorAll('[tabindex]')).filter(function(el){
-                return el.tagName !== 'INPUT' && el.tagName !== 'BUTTON' && el.tagName !== 'SELECT' && el.tagName !== 'A';
-            }).map(function(el){
-                var r = el.getBoundingClientRect();
-                return { aria:el.getAttribute('aria-label'), role:el.getAttribute('role'), x:Math.round(r.x), y:Math.round(r.y), w:Math.round(r.width), h:Math.round(r.height) };
-            }).filter(function(el){ return el.w > 50 && el.h > 20 && el.y > 100 && el.y < 600; });
-            return {
-                combos: combos.map(function(el){
-                    var r = el.getBoundingClientRect();
-                    return { aria:el.getAttribute('aria-label'), role:el.getAttribute('role'), x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2) };
-                }),
-                tabEls: tabEls
-            };
-        `);
-
-        // Trouver les dropdowns Month/Day/Year via leur aria-label
-        let monthEl = null, dayEl = null, yearEl = null;
-
-        const allCombos = domInfo.combos || [];
-        for (let el of allCombos) {
-            if (/month|mois/i.test(el.aria)) monthEl = el;
-            else if (/day|jour/i.test(el.aria)) dayEl = el;
-            else if (/year|ann/i.test(el.aria)) yearEl = el;
+        // 1. Obtenir CSRF + cookies
+        log('🔐 Récupération CSRF...');
+        const { csrf, cookieStr } = await getCsrfAndCookie();
+        if (!csrf) {
+            state.status = 'ready';
+            return res.json({ ok: false, msg: '❌ CSRF introuvable — réessaie' });
         }
 
-        // Si pas trouvé via aria, utiliser les tabEls positionnés (les 3 dropdowns sont côte à côte)
-        if (!monthEl || !dayEl || !yearEl) {
-            const tabEls = (domInfo.tabEls || []).filter(el => el.w > 80 && el.h > 30);
-            tabEls.sort((a, b) => a.x - b.x);
-            if (tabEls.length >= 3) {
-                if (!monthEl) monthEl = tabEls[0];
-                if (!dayEl)   dayEl   = tabEls[1];
-                if (!yearEl)  yearEl  = tabEls[2];
-            }
-        }
-
-        console.log(`   Month@(${monthEl?.x},${monthEl?.y}) Day@(${dayEl?.x},${dayEl?.y}) Year@(${yearEl?.x},${yearEl?.y})`);
-
-        if (!monthEl || !dayEl || !yearEl) {
-            return res.json({ ok:false, msg:`❌ Dropdowns introuvables. Combos:${allCombos.length}` });
-        }
-
-        // Fonction pour cliquer sur un dropdown et sélectionner une option
-        async function clickDropdownAndSelect(dropX, dropY, optionText) {
-            // Cliquer sur le dropdown pour l'ouvrir
-            await browserRef.executeScript(`
-                var el = document.elementFromPoint(arguments[0], arguments[1]);
-                if (el) { el.click(); el.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:arguments[0],clientY:arguments[1]})); }
-            `, dropX, dropY);
-            await sleep(800);
-
-            // Chercher l'option dans le menu ouvert (listbox/option)
-            const selected = await browserRef.executeScript(`
-                var target = arguments[0];
-                var targets = [target, String(parseInt(target))];
-                // Chercher dans les options du menu ouvert
-                var options = Array.from(document.querySelectorAll('[role="option"],[role="listitem"],li,div[class*="option"]'));
-                for (var i = 0; i < options.length; i++) {
-                    var txt = options[i].textContent.trim();
-                    for (var j = 0; j < targets.length; j++) {
-                        if (txt === targets[j] || txt.toLowerCase() === targets[j].toLowerCase()) {
-                            options[i].scrollIntoView({block:'center'});
-                            options[i].click();
-                            return txt;
-                        }
-                    }
-                }
-                // Si pas de menu ouvert, essayer le select natif juste après le clic
-                return null;
-            `, String(optionText));
-
-            if (!selected) {
-                // Peut-être que c'est un vrai select natif qui s'est ouvert — utiliser sendKeys
-                try {
-                    const { Key } = require('selenium-webdriver');
-                    const el = await browserRef.findElement(By.css(':focus'));
-                    if (el) {
-                        await el.sendKeys(String(optionText).charAt(0));
-                        await sleep(300);
-                    }
-                } catch(e) {}
-            }
-            await sleep(500);
-            return selected;
-        }
-
-        // Cliquer Month
-        let mRes = await clickDropdownAndSelect(monthEl.x, monthEl.y, targetMonth);
-        if (!mRes) mRes = await clickDropdownAndSelect(monthEl.x, monthEl.y, targetMonthFr);
-        console.log(`   Month cliqué : "${mRes}"`);
-        await sleep(300);
-
-        // Cliquer Day
-        let dRes = await clickDropdownAndSelect(dayEl.x, dayEl.y, String(dayNum));
-        console.log(`   Day cliqué : "${dRes}"`);
-        await sleep(300);
-
-        // Cliquer Year
-        let yRes = await clickDropdownAndSelect(yearEl.x, yearEl.y, String(yearNum));
-        console.log(`   Year cliqué : "${yRes}"`);
-        await sleep(800);
-
-        state.screenshot = await browserRef.takeScreenshot();
-
-        // ── SCROLL BAS + CLIC SUBMIT ─────────────────────────────────────────
-        await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-        await sleep(800);
-        state.screenshot = await browserRef.takeScreenshot();
-
-        let submitOk = false;
-        for (let si = 0; si < 3; si++) {
-            await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-            await sleep(400);
-
-            // Méthode 1 : clic JS direct sur le bouton Submit (bypasse la détection Selenium)
-            const submitResult = await browserRef.executeScript(`
-                // Masquer webdriver juste avant le submit
-                try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch(e) {}
-                var btns = Array.from(document.querySelectorAll('[role="button"],button'));
-                var btn = null;
-                for (var b of btns) {
-                    var txt = b.textContent.trim();
-                    if (txt === 'Submit' || txt === 'Next') { btn = b; break; }
-                }
-                if (!btn) {
-                    // Chercher par type="submit"
-                    btn = document.querySelector('button[type="submit"], input[type="submit"]');
-                }
-                if (btn) {
-                    // Simuler un vrai clic humain
-                    var rect = btn.getBoundingClientRect();
-                    var cx = rect.left + rect.width/2;
-                    var cy = rect.top + rect.height/2;
-                    btn.dispatchEvent(new MouseEvent('mouseover', {bubbles:true, clientX:cx, clientY:cy}));
-                    btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:cx, clientY:cy}));
-                    btn.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true, clientX:cx, clientY:cy}));
-                    btn.dispatchEvent(new MouseEvent('click',     {bubbles:true, clientX:cx, clientY:cy}));
-                    // Essayer aussi via le form
-                    var form = btn.closest('form');
-                    if (form) {
-                        try { form.dispatchEvent(new Event('submit', {bubbles:true, cancelable:true})); } catch(e) {}
-                    }
-                    return { ok:true, txt:btn.textContent.trim(), x:Math.round(cx), y:Math.round(cy) };
-                }
-                return { ok:false };
-            `);
-            console.log(`   Essai ${si+1} JS submit: ${JSON.stringify(submitResult)}`);
-
-            if (submitResult && submitResult.ok) {
-                // Attendre et vérifier si la page a changé
-                await sleep(3000);
-
-                // Méthode 2 (fallback) : clic Actions Selenium aux coordonnées
-                const url = await browserRef.getCurrentUrl();
-                console.log(`   URL essai ${si+1} : ${url}`);
-                state.screenshot = await browserRef.takeScreenshot();
-
-                if (!url.includes('emailsignup')) {
-                    submitOk = true;
-                    console.log("✅ Page changée — Submit réussi !");
-                    break;
-                }
-                // Vérifier si champ code apparu
-                try {
-                    await browserRef.findElement(By.xpath("//input[@inputmode='numeric' or @name='confirmationCode' or @autocomplete='one-time-code']"));
-                    submitOk = true;
-                    console.log("✅ Champ code apparu !");
-                    break;
-                } catch(e) {}
-
-                // Si JS click n'a pas fonctionné, essayer Selenium Actions
-                if (si < 2) {
-                    await browserRef.actions()
-                        .move({x: submitResult.x, y: submitResult.y})
-                        .pause(200)
-                        .press()
-                        .pause(100)
-                        .release()
-                        .perform();
-                    console.log(`   ✅ Clic Actions (${submitResult.x},${submitResult.y})`);
-                    await sleep(3000);
-                    const url2 = await browserRef.getCurrentUrl();
-                    console.log(`   URL après Actions: ${url2}`);
-                    if (!url2.includes('emailsignup')) { submitOk = true; break; }
-                }
-            } else {
-                console.log(`   Essai ${si+1} : bouton Submit introuvable`);
-                await sleep(2000);
-            }
-        }
-
-        if (submitOk) {
-            state.status = 'waiting_code';
-            liveLoopPaused = false;
-            res.json({ ok:true, msg:'✅ Submit réussi ! En attente du code...' });
-        } else {
-            // Submit auto échoué → l'utilisateur clique manuellement
-            state.status = 'ready_for_submit';
-            liveLoopPaused = false;
-            res.json({ ok:true, msg:'⚠️ Clique sur "Soumettre" dans la prochaine page !' });
-        }
-
-    } catch(e) {
-        liveLoopPaused = false;
-        console.error("❌ inject : " + e.message);
-        res.json({ ok:false, msg:'❌ ' + e.message });
-    }
-});
-
-// Route /do-submit — clic sur Submit Instagram
-app.post('/do-submit', async (req, res) => {
-    liveLoopPaused = true;
-    try {
-        if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
-
-        // Scroll en bas pour voir le bouton
-        await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-        await sleep(600);
-
-        // Clic JS + stealth sur Submit
-        const submitResult = await browserRef.executeScript(`
-            try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch(e) {}
-            var btns = Array.from(document.querySelectorAll('[role="button"],button'));
-            var btn = null;
-            for (var b of btns) {
-                var txt = b.textContent.trim();
-                if (txt === 'Submit' || txt === 'Next') { btn = b; break; }
-            }
-            if (!btn) btn = document.querySelector('button[type="submit"], input[type="submit"]');
-            if (!btn) {
-                // Prendre le plus grand bouton visible
-                var maxArea = 0;
-                for (var b of btns) {
-                    var r = b.getBoundingClientRect();
-                    if (r.width * r.height > maxArea && r.width > 100 && !b.textContent.includes('already')) {
-                        maxArea = r.width * r.height; btn = b;
-                    }
-                }
-            }
-            if (!btn) return { ok:false, debug: btns.map(function(b){ var r=b.getBoundingClientRect(); return {txt:b.textContent.trim().substring(0,20),w:Math.round(r.width),h:Math.round(r.height)}; }) };
-            var rect = btn.getBoundingClientRect();
-            var cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
-            btn.dispatchEvent(new MouseEvent('mouseover', {bubbles:true, clientX:cx, clientY:cy}));
-            btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:cx, clientY:cy}));
-            btn.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true, clientX:cx, clientY:cy}));
-            btn.dispatchEvent(new MouseEvent('click',     {bubbles:true, clientX:cx, clientY:cy}));
-            var form = btn.closest('form');
-            if (form) { try { form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); } catch(e) {} }
-            return { ok:true, txt:btn.textContent.trim(), x:Math.round(cx), y:Math.round(cy) };
-        `);
-        console.log(`✅ do-submit JS clic: ${JSON.stringify(submitResult)}`);
-
-        if (!submitResult || !submitResult.ok) {
-            liveLoopPaused = false;
-            return res.json({ ok:false, msg:'❌ Bouton Submit introuvable: ' + JSON.stringify(submitResult?.debug?.slice(0,4)) });
-        }
-
-        await sleep(4000);
-        state.screenshot = await browserRef.takeScreenshot();
-        const url = await browserRef.getCurrentUrl();
-        console.log(`   URL après clic : ${url}`);
-
-        // Vérifier si page changée ou champ code apparu
-        let success = !url.includes('emailsignup');
-        if (!success) {
-            try {
-                await browserRef.findElement(By.xpath("//input[@inputmode='numeric' or @name='confirmationCode']"));
-                success = true;
-            } catch(e) {}
-        }
-
-        // Si toujours bloqué, essayer Selenium Actions en plus
-        if (!success) {
-            await browserRef.actions()
-                .move({x: submitResult.x, y: submitResult.y})
-                .pause(300)
-                .press()
-                .pause(150)
-                .release()
-                .perform();
-            console.log(`   Actions backup (${submitResult.x},${submitResult.y})`);
-            await sleep(3000);
-            const url2 = await browserRef.getCurrentUrl();
-            console.log(`   URL après Actions: ${url2}`);
-            success = !url2.includes('emailsignup');
-            state.screenshot = await browserRef.takeScreenshot();
-        }
-
-        // Détecter si captcha apparu
-        const hasCaptcha = await browserRef.executeScript(`
-            return !!(document.querySelector('iframe[src*="recaptcha"]') ||
-                      document.querySelector('.g-recaptcha') ||
-                      document.querySelector('[title*="captcha" i]') ||
-                      document.querySelector('iframe[src*="captcha"]') ||
-                      document.body.textContent.includes('not a robot') ||
-                      document.body.textContent.includes('confirm it'));
-        `);
-        console.log(`   Captcha détecté : ${hasCaptcha}`);
-
-        liveLoopPaused = false;
-        if (hasCaptcha) {
-            state.status = 'waiting_captcha';
-            return res.json({ ok: true, msg: '🤖 Captcha détecté — coche "I am not a robot" dans le screenshot !' });
-        }
-
-        state.status = 'waiting_code';
-        res.json({ ok: true, msg: success ? '✅ Compte soumis !' : '⚠️ Submit cliqué — vérifie le screenshot' });
-
-    } catch(e) {
-        liveLoopPaused = false;
-        console.error("❌ do-submit : " + e.message);
-        res.json({ ok:false, msg:'❌ ' + e.message });
-    }
-});
-
-// Route remote-click — transmet un clic de l'utilisateur au navigateur headless
-app.post('/remote-click', async (req, res) => {
-    try {
-        if (!browserRef) return res.json({ ok:false, msg:'Browser non dispo' });
-        const { x, y } = req.body;
-        if (typeof x !== 'number' || typeof y !== 'number')
-            return res.json({ ok:false, msg:'Coordonnées invalides' });
-
-        console.log(`   🖱️ Remote clic (${x},${y})`);
-
-        // Essayer d'abord de switcher dans un iframe reCAPTCHA si présent
-        let usedIframe = false;
+        // 2. Vérifier username disponible
+        log('👤 Vérif username : ' + state.uName);
         try {
-            const iframes = await browserRef.findElements(By.tagName('iframe'));
-            for (let iframe of iframes) {
-                const src = (await iframe.getAttribute('src') || '');
-                if (src.includes('recaptcha') || src.includes('anchor')) {
-                    const iRect = await browserRef.executeScript(
-                        "var r=arguments[0].getBoundingClientRect(); return {x:r.left,y:r.top,w:r.width,h:r.height};", iframe
-                    );
-                    // Si le clic est dans l'iframe
-                    if (x >= iRect.x && x <= iRect.x+iRect.w && y >= iRect.y && y <= iRect.y+iRect.h) {
-                        await browserRef.switchTo().frame(iframe);
-                        const lx = Math.round(x - iRect.x);
-                        const ly = Math.round(y - iRect.y);
-                        await browserRef.actions().move({x: lx, y: ly}).press().release().perform();
-                        await browserRef.switchTo().defaultContent();
-                        usedIframe = true;
-                        console.log(`   ✅ Clic dans iframe reCAPTCHA (${lx},${ly})`);
-                        break;
-                    }
-                }
+            const chkRes  = await fetch('https://www.instagram.com/api/v1/users/check_username/', {
+                method : 'POST',
+                headers: igHeaders({ 'X-CSRFToken': csrf, 'Cookie': cookieStr }),
+                body   : encode({ username: state.uName })
+            });
+            const chkData = await chkRes.json();
+            if (chkData.available === false) {
+                state.uName = username();
+                log('🔄 Username pris → ' + state.uName);
             }
-        } catch(e) {
-            try { await browserRef.switchTo().defaultContent(); } catch(_) {}
-        }
+        } catch(e) {}
 
-        if (!usedIframe) {
-            // Clic direct aux coordonnées dans la page principale
-            await browserRef.actions().move({x, y}).press().release().perform();
-            console.log(`   ✅ Clic page principale (${x},${y})`);
-        }
+        // 3. Créer le compte
+        log('📡 Envoi requête création...');
+        const result = await createIgAccount(csrf, cookieStr, month, day, year);
 
-        await sleep(800);
-        state.screenshot = await browserRef.takeScreenshot();
-
-        // Vérifier si page changée après le clic
-        const url = await browserRef.getCurrentUrl();
-        if (!url.includes('emailsignup')) {
+        // Succès
+        if (result.account_created || result.status === 'ok' || result.user_id || result.userId) {
+            log('✅ Compte créé avec succès !');
             state.status = 'waiting_code';
-            return res.json({ ok:true, msg:'✅ Page changée — code en attente !', status:'waiting_code' });
+            return res.json({ ok: true, msg: '✅ Compte soumis ! Attends le code email...' });
         }
 
-        res.json({ ok:true, msg:`✅ Clic (${x},${y}) transmis` });
-    } catch(e) {
-        console.error("❌ remote-click : " + e.message);
-        try { await browserRef.switchTo().defaultContent(); } catch(_) {}
-        res.json({ ok:false, msg:'❌ ' + e.message });
-    }
-});
-
-// Route captcha-click — clic checkbox reCAPTCHA dans l'iframe
-app.post('/captcha-click', async (req, res) => {
-    try {
-        if (!browserRef) return res.json({ ok:false, msg:'Browser non dispo' });
-        const iframes = await browserRef.findElements(By.tagName('iframe'));
-        console.log(`   ${iframes.length} iframe(s)`);
-        let checked = false;
-        for (let iframe of iframes) {
-            const src = (await iframe.getAttribute('src') || '');
-            if (src.includes('recaptcha') || src.includes('captcha') || src.includes('anchor')) {
-                await browserRef.switchTo().frame(iframe);
-                await sleep(300);
-                try {
-                    const cb = await browserRef.findElement(By.css('.recaptcha-checkbox-border, #recaptcha-anchor, [role="checkbox"], .rc-anchor-checkbox-label'));
-                    await cb.click();
-                    checked = true;
-                    console.log("   ✅ Checkbox cliquée via iframe!");
-                } catch(e) { console.log("   Checkbox err: " + e.message); }
-                await browserRef.switchTo().defaultContent();
-                break;
-            }
-        }
-        await sleep(2000);
-        state.screenshot = await browserRef.takeScreenshot();
-        res.json({ ok:true, checked, msg: checked ? '✅ Checkbox cliquée ! Attends 2s puis clique Next' : '⚠️ Iframe reCAPTCHA non trouvé' });
-    } catch(e) {
-        try { await browserRef.switchTo().defaultContent(); } catch(_) {}
-        res.json({ ok:false, msg:'❌ ' + e.message });
-    }
-});
-
-// Route captcha-next — clic bouton Next du dialog captcha
-app.post('/captcha-next', async (req, res) => {
-    try {
-        if (!browserRef) return res.json({ ok:false, msg:'Browser non dispo' });
-        // Chercher le bouton Next dans le dialog (role=button, txt=Next)
-        const nextCoords = await browserRef.executeScript(`
-            var btns = Array.from(document.querySelectorAll('[role="button"],button'));
-            for (var b of btns) {
-                if (b.textContent.trim() === 'Next') {
-                    var r = b.getBoundingClientRect();
-                    return {x: Math.round(r.left+r.width/2), y: Math.round(r.top+r.height/2)};
-                }
-            }
-            return null;
-        `);
-        console.log("   Next coords : " + JSON.stringify(nextCoords));
-        if (nextCoords) {
-            await browserRef.actions().move({x: nextCoords.x, y: nextCoords.y}).press().release().perform();
-            console.log(`   ✅ Next cliqué (${nextCoords.x},${nextCoords.y})`);
-        }
-        await sleep(3000);
-        state.screenshot = await browserRef.takeScreenshot();
-        const url = await browserRef.getCurrentUrl();
-        console.log("   URL : " + url);
-        if (!url.includes('emailsignup')) {
+        // Checkpoint (Instagram demande vérification)
+        if (result.checkpoint_url || (result.message && result.message.includes('checkpoint'))) {
+            log('🔒 Checkpoint détecté — vérifie l\'email');
             state.status = 'waiting_code';
-            return res.json({ ok:true, msg:'✅ Captcha validé — en attente du code !' });
+            return res.json({ ok: true, msg: '⚠️ Checkpoint — code envoyé à ton email !' });
         }
-        res.json({ ok:true, msg:'⚠️ Next cliqué — vérifie le screenshot' });
+
+        // Erreurs de champs
+        if (result.errors) {
+            const errStr = JSON.stringify(result.errors);
+            log('⚠️ Erreurs : ' + errStr.substring(0, 150));
+            if (errStr.includes('email') || errStr.includes('taken')) {
+                state.email  = await getFakeMail();
+                state.status = 'ready';
+                return res.json({ ok: false, msg: '⚠️ Email/username pris → nouvelles infos générées, réessaie !' });
+            }
+            state.status = 'ready';
+            return res.json({ ok: false, msg: '❌ ' + errStr.substring(0, 120) });
+        }
+
+        // Autre message d'erreur
+        const msg = result.message || result.error || JSON.stringify(result).substring(0, 120);
+        log('⚠️ Réponse : ' + msg);
+        state.status = 'ready';
+        return res.json({ ok: false, msg: '⚠️ ' + msg });
+
     } catch(e) {
-        res.json({ ok:false, msg:'❌ ' + e.message });
+        log('❌ Erreur create : ' + e.message);
+        state.status = 'ready';
+        return res.json({ ok: false, msg: '❌ ' + e.message });
     }
 });
 
-// Route captcha-done — l'utilisateur a coché le captcha
-app.post('/captcha-done', async (req, res) => {
-    console.log("✅ Captcha coché par l'utilisateur");
-    // Essayer de cliquer le bouton Next/Submit du captcha
-    try {
-        if (browserRef) {
-            await sleep(500);
-            // Cliquer le bouton Next dans la dialog captcha
-            const clicked = await browserRef.executeScript(`
-                var btns = Array.from(document.querySelectorAll('button,input[type="submit"]'));
-                for (var b of btns) {
-                    var txt = (b.textContent||b.value||'').trim().toLowerCase();
-                    if (txt === 'next' || txt === 'submit' || txt === 'continue' || txt === 'ok') {
-                        b.click(); return txt;
-                    }
-                }
-                return null;
-            `);
-            console.log("   Clic post-captcha : " + clicked);
-            await sleep(2000);
-            state.screenshot = await browserRef.takeScreenshot();
-        }
-    } catch(e) {}
-    state.status = 'waiting_code';
+// ── POST /submit-code ─────────────────────────────────────────────────────────
+app.post('/submit-code', function(req, res) {
+    state.confirmCode = req.body.code;
+    log('🔑 Code reçu : ' + state.confirmCode);
     res.json({ ok: true });
 });
 
-// Code manuel
-app.post('/submit-code', (req, res) => {
-    state.confirmCode = req.body.code;
-    console.log("🔑 Code manuel : " + state.confirmCode);
-    res.send(`<body style="font-family:Arial;text-align:center;padding:40px"><h2 style="color:green">✅ Code reçu !</h2><meta http-equiv="refresh" content="2;url=/"></body>`);
+// ── GET /status ───────────────────────────────────────────────────────────────
+app.get('/status', function(req, res) {
+    res.json({ status: state.status, log: state.log.slice(-10) });
 });
 
-app.get('/debug-image', (req, res) => {
-    if (fs.existsSync('error_screenshot.png')) res.sendFile(path.join(process.cwd(), 'error_screenshot.png'));
-    else res.send('Pas de screenshot');
-});
-
-app.listen(port, '0.0.0.0', () => console.log(`🌐 Port ${port}`));
-
-// ─── UTILITAIRES ──────────────────────────────────────────────────────────────
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-async function humanType(el, text) {
-    for (let c of text) { await el.sendKeys(c); await sleep(Math.random()*30+15); }
-}
-async function fillReact(browser, el, val) {
-    await browser.executeScript(`
-        var e=arguments[0],v=arguments[1];
-        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(e,v);
-        ['input','change','blur'].forEach(function(n){ e.dispatchEvent(new Event(n,{bubbles:true})); });
-    `, el, val);
-    await sleep(200);
-}
-
-// ─── PROXY ROTATIF ───────────────────────────────────────────────────────────
-async function getFreeProxy() {
-    const sources = [
-        'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=elite',
-        'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
-        'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
-        'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
-        'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt',
-    ];
-
-    let allProxies = [];
-    for (const url of sources) {
-        try {
-            const res = await fetch(url);
-            const text = await res.text();
-            const proxies = text.split('\n')
-                .map(l => l.trim().split('#')[0].trim())
-                .filter(l => { const p = l.split(':'); return p.length===2 && p[0].split('.').length===4 && parseInt(p[1])>0 && parseInt(p[1])<65536; });
-            allProxies = allProxies.concat(proxies);
-            if (allProxies.length >= 50) break;
-        } catch(e) {}
-    }
-
-    if (allProxies.length === 0) {
-        console.log("⚠️ Aucun proxy disponible — IP directe");
-        return null;
-    }
-
-    // Mélanger et tester les proxies jusqu'à en trouver un qui répond
-    const shuffled = allProxies.sort(() => Math.random() - 0.5).slice(0, 30);
-    console.log(`🌐 Test de ${shuffled.length} proxies...`);
-
-    for (const proxy of shuffled) {
-        try {
-            const [host, port] = proxy.split(':');
-            // Test rapide : connexion TCP (via fetch avec timeout court)
-            const controller = new AbortController();
-            const tid = setTimeout(() => controller.abort(), 4000);
-            const r = await fetch('http://httpbin.org/ip', {
-                signal: controller.signal,
-                // On ne peut pas tester le proxy directement en fetch Node, on retourne juste le premier
-            });
-            clearTimeout(tid);
-            // Si on arrive ici, notre fetch direct marche — retourner ce proxy sans test (Chrome le testera)
-            console.log(`🌐 Proxy choisi : ${proxy}`);
-            return proxy;
-        } catch(e) {}
-    }
-
-    // Retourner un proxy aléatoire sans test
-    const pick = shuffled[0];
-    console.log(`🌐 Proxy sans test : ${pick}`);
-    return pick;
-}
+app.listen(PORT, '0.0.0.0', function() { log('🌐 Serveur port ' + PORT); });
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 (async function main() {
-    const chromePath = path.join(process.cwd(), 'chrome-linux64/chrome');
-    const driverPath = path.join(process.cwd(), 'chromedriver-linux64/chromedriver');
-    const service = new chrome.ServiceBuilder(driverPath);
-    const opts = new chrome.Options();
-    opts.setChromeBinaryPath(chromePath);
-    // User-Agent aléatoire parmi plusieurs profils Chrome réels
-    const USER_AGENTS = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
-    ];
-    const chosenUA = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-    console.log(`🖥️ User-Agent : ${chosenUA.substring(0, 60)}...`);
+    log('════════════════════════════');
+    log('🤖 Bot Instagram — API v2');
+    log('════════════════════════════');
 
-    opts.addArguments(
-        '--headless=new','--no-sandbox','--disable-dev-shm-usage',
-        '--window-size=1280,900',
-        '--disable-blink-features=AutomationControlled',
-        '--lang=en-US,en',
-        '--disable-infobars',
-        '--disable-extensions',
-        '--disable-gpu',
-        '--disable-web-security',
-        '--allow-running-insecure-content',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--ignore-certificate-errors',
-        '--disable-popup-blocking',
-        '--disable-notifications',
-    );
-    opts.addArguments(`--user-agent=${chosenUA}`);
-    // Cache/cookies vierges à chaque démarrage (profil temporaire unique)
-    const tmpProfile = `/tmp/chrome-profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    opts.addArguments(`--user-data-dir=${tmpProfile}`);
-    opts.setUserPreferences({
-        'intl.accept_languages':'en-US,en',
-        'credentials_enable_service': false,
-        'profile.password_manager_enabled': false,
-    });
-    // Exclure les switches d'automation
-    opts.excludeSwitches(['enable-automation']);
+    state.fullName = generatingName();
+    state.uName    = username();
+    state.email    = await getFakeMail();
+    log('👤 Nom  : ' + state.fullName);
+    log('👤 User : ' + state.uName);
+    state.status = 'ready';
+    log('✅ Prêt — choisis la date !');
 
-    let browser = await new Builder().forBrowser('chrome').setChromeOptions(opts).setChromeService(service).build();
-    browserRef = browser;
-
-    // Screenshot en continu toutes les 3s (pas trop fréquent pour éviter conflits)
-    const liveLoop = setInterval(async () => {
-        if (liveLoopPaused) return;
-        try { state.screenshot = await browser.takeScreenshot(); }
-        catch(e) { clearInterval(liveLoop); }
-    }, 3000);
-
-    try {
-        // ── 1. SETUP ──────────────────────────────────────────────────────────
-        let mail = await getFakeMail();
-        state.email    = mail;
-        state.token    = global._mailToken || '';
-        state.fullName = generatingName();
-        state.uName    = username();
-        state.status   = 'loading';
-        console.log(`👤 Nom: "${state.fullName}" | Username: "${state.uName}"`);
-
-        // ── 2. OUVRIR INSTAGRAM ───────────────────────────────────────────────
-        console.log("🌍 Ouverture Instagram...");
-        // Injecter le stealth script avant le chargement de la page
-        await browser.get("about:blank");
-        await browser.executeScript(`
-            // Masquer navigator.webdriver
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            // Masquer l'automation Chrome
-            window.chrome = { runtime: {} };
-            Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] });
-        `);
-        await browser.get("https://www.instagram.com/accounts/emailsignup/");
-        await sleep(6000);
-
-        // Cookie popup
-        try {
-            let btn = await browser.findElement(By.xpath("//button[contains(.,'Allow') or contains(.,'Accept') or contains(.,'Accepter') or contains(.,'Tout autoriser')]"));
-            await btn.click(); await sleep(1500);
-        } catch(e) {}
-
-        // ── 3. EMAIL ──────────────────────────────────────────────────────────
-        console.log("✍️ Email...");
-        let inputs = await browser.findElements(By.tagName("input"));
-        for (let inp of inputs) {
-            let t = await inp.getAttribute("type");
-            if (t === "text" || t === "email" || t === "tel") {
-                await browser.executeScript("arguments[0].click();arguments[0].focus();", inp);
-                await sleep(300);
-                await humanType(inp, mail);
-                await fillReact(browser, inp, mail);
-                console.log("✅ Email : " + mail);
-                break;
-            }
-        }
-        await sleep(500);
-
-        // ── 4. PASSWORD ───────────────────────────────────────────────────────
-        console.log("🔒 Password...");
-        inputs = await browser.findElements(By.tagName("input"));
-        for (let inp of inputs) {
-            let t = await inp.getAttribute("type");
-            if (t === "password") {
-                await browser.executeScript("arguments[0].click();arguments[0].focus();", inp);
-                await sleep(200);
-                await humanType(inp, state.password);
-                await fillReact(browser, inp, state.password);
-                // Blur fort pour déclencher l'apparition des selects
-                await browser.executeScript(`
-                    arguments[0].blur();
-                    document.body.click();
-                    document.body.dispatchEvent(new MouseEvent('click',{bubbles:true}));
-                `, inp);
-                await sleep(3000); // Attendre que les selects apparaissent
-                console.log("✅ Password saisi");
-                break;
-            }
-        }
-
-        // ── 5. VÉRIFIER QUE LES SELECTS SONT LÀ ──────────────────────────────
-        let selects = await browser.findElements(By.tagName("select"));
-        console.log(`   ${selects.length} select(s) après password blur`);
-        if (selects.length < 3) {
-            // Attendre encore
-            for (let i = 0; i < 5; i++) {
-                await sleep(2000);
-                selects = await browser.findElements(By.tagName("select"));
-                console.log(`   Attente selects ${i+1}/5 : ${selects.length}`);
-                if (selects.length >= 3) break;
-            }
-        }
-
-        // ── 6. NOM & USERNAME ─────────────────────────────────────────────────
-        console.log("👤 Nom & Username...");
-        let allInputs = await browser.findElements(By.tagName("input"));
-        let textInputs = [];
-        for (let inp of allInputs) {
-            let t = await inp.getAttribute("type");
-            if (t === "text" || t === "search") textInputs.push(inp);
-        }
-        console.log(`   ${textInputs.length} input(s) texte`);
-
-        if (textInputs.length >= 2) {
-            let nameInp = textInputs[textInputs.length - 2];
-            await browser.executeScript("arguments[0].click();arguments[0].focus();", nameInp);
-            await sleep(200);
-            await humanType(nameInp, state.fullName);
-            await fillReact(browser, nameInp, state.fullName);
-            console.log("✅ Nom : " + state.fullName);
-            await sleep(400);
-        }
-
-        // Saisir le username et vérifier qu'il est disponible (pas d'erreur rouge)
-        if (textInputs.length >= 1) {
-            let userInp = textInputs[textInputs.length - 1];
-            let usernameOk = false;
-            for (let attempt = 0; attempt < 8; attempt++) {
-                // Générer un nouveau username si ce n'est pas le premier essai
-                if (attempt > 0) {
-                    const { username: genUsername } = require('./accountInfoGenerator');
-                    state.uName = genUsername();
-                    console.log(`   🔄 Nouveau username (essai ${attempt+1}) : ${state.uName}`);
-                }
-                // Vider et remplir le champ
-                await browser.executeScript("arguments[0].click();arguments[0].focus();", userInp);
-                await sleep(150);
-                await browser.executeScript(`
-                    var e=arguments[0];
-                    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(e,'');
-                    e.dispatchEvent(new Event('input',{bubbles:true}));
-                `, userInp);
-                await sleep(100);
-                await humanType(userInp, state.uName);
-                await fillReact(browser, userInp, state.uName);
-                await sleep(1500); // Attendre la vérification Instagram
-                // Vérifier s'il y a une erreur "not available"
-                const hasError = await browser.executeScript(`
-                    var errs = Array.from(document.querySelectorAll('p,span,div'));
-                    return errs.some(function(el){
-                        var t = el.textContent.toLowerCase();
-                        return (t.includes('not available') || t.includes('pas disponible') || t.includes('already taken') || t.includes('déjà pris')) && el.offsetHeight > 0;
-                    });
-                `);
-                // Vérifier s'il y a un checkmark vert (username dispo)
-                const hasCheck = await browser.executeScript(`
-                    var checks = Array.from(document.querySelectorAll('svg,[aria-label*="check"],[aria-label*="valid"]'));
-                    var inp = document.querySelector('input[aria-label="Username"]') || document.querySelectorAll('input[type="text"]')[document.querySelectorAll('input[type="text"]').length-1];
-                    if (inp) {
-                        var parent = inp.parentElement;
-                        while(parent && parent.tagName !== 'FORM') {
-                            if(parent.querySelector('svg')) return true;
-                            parent = parent.parentElement;
-                        }
-                    }
-                    return false;
-                `);
-                console.log(`   Username "${state.uName}" : erreur=${hasError} check=${hasCheck}`);
-                if (!hasError) { usernameOk = true; break; }
-            }
-            console.log(`✅ Username final : ${state.uName} (ok=${usernameOk})`);
-        }
-
-        // ── 7. ATTENTE SAISIE DATE PAR L'UTILISATEUR ──────────────────────────
-        console.log("🎂 En attente de la date (interface web)...");
-        state.status = 'ready_for_date';
-
-        let waited = 0;
-        while (state.status === 'ready_for_date' && waited < 600) {
-            await sleep(2000); waited += 2;
-        }
-
-        // Si timeout mais le submit a déjà été tenté (ready_for_submit) → attendre encore
-        if (state.status === 'ready_for_submit') {
-            console.log("⏳ En attente du clic Submit manuel...");
-            let ws = 0;
-            while ((state.status === 'ready_for_submit' || state.status === 'waiting_captcha') && ws < 600) { await sleep(2000); ws += 2; }
-        }
-
-        if (state.status !== 'waiting_code') {
-            // Ne pas mettre en erreur — passer en ready_for_submit pour que l'utilisateur puisse cliquer
-            console.log("⚠️ Timeout date — passage en ready_for_submit");
-            state.status = 'ready_for_submit';
-            let ws2 = 0;
-            while ((state.status === 'ready_for_submit' || state.status === 'waiting_captcha') && ws2 < 600) { await sleep(2000); ws2 += 2; }
-        }
-
-        if (state.status !== 'waiting_code') {
-            state.status = 'error'; state.errorMsg = 'Timeout final';
-            clearInterval(liveLoop); return;
-        }
-
-        // ── 8. CODE DE VÉRIFICATION ───────────────────────────────────────────
-        console.log("📬 Attente code...");
-        let code = await getCodeFromMail();
-
-        if (!code) {
-            console.log("   ⏳ Attente code manuel (5 min)...");
-            let w = 0;
-            while (!state.confirmCode && w < 300) { await sleep(2000); w += 2; }
-            code = state.confirmCode;
-        }
-
-        if (code && code.length >= 4) {
-            console.log("🔑 Code : " + code);
-            let codeInput = null;
-            try {
-                codeInput = await browser.wait(until.elementLocated(
-                    By.xpath("//input[@name='confirmationCode' or @inputmode='numeric' or @autocomplete='one-time-code']")
-                ), 10000);
-            } catch(e) {
-                let ins = await browser.findElements(By.tagName("input"));
-                if (ins.length > 0) codeInput = ins[0];
-            }
-            if (codeInput) {
-                await browser.executeScript("arguments[0].focus();", codeInput);
-                await humanType(codeInput, code);
-                await fillReact(browser, codeInput, code);
-                await sleep(800);
-                let cBtns = await browser.findElements(By.tagName("button"));
-                if (cBtns.length > 0) {
-                    await browser.executeScript("arguments[0].click();", cBtns[0]);
-                    console.log("✅ Code soumis !");
-                }
-            }
-        }
-
-        await sleep(5000);
-        clearInterval(liveLoop);
-        try { state.screenshot = await browser.takeScreenshot(); } catch(e) {}
-        state.status = 'done';
-
-        console.log("════════════════════════════════════════");
-        console.log("🎉 COMPTE CRÉÉ !");
-        console.log(`   📧 Email    : ${state.email}`);
-        console.log(`   🔒 Password : ${state.password}`);
-        console.log(`   👤 Username : @${state.uName}`);
-        console.log(`   🏷️  Nom      : ${state.fullName}`);
-        console.log("════════════════════════════════════════");
-
-    } catch(e) {
-        clearInterval(liveLoop);
-        console.error("❌ ERREUR : " + e.message);
-        state.status = 'error'; state.errorMsg = e.message;
-        try { state.screenshot = await browser.takeScreenshot(); } catch(_) {}
-    } finally {
-        await sleep(60000);
-        await browser.quit();
+    // Attendre la création
+    while (state.status !== 'waiting_code' && state.status !== 'done' && state.status !== 'error') {
+        await sleep(2000);
     }
+    if (state.status !== 'waiting_code') return;
+
+    // Récupérer le code email
+    log('📬 Attente code email...');
+    let code = await getCodeFromMail();
+
+    if (!code) {
+        log('⏳ Attente code manuel (5 min)...');
+        const start = Date.now();
+        while (!state.confirmCode && (Date.now() - start) < 300000) {
+            await sleep(2000);
+        }
+        code = state.confirmCode;
+    }
+
+    if (code) {
+        log('🔑 Soumission code : ' + code);
+        try {
+            const { csrf, cookieStr } = await getCsrfAndCookie();
+            const res = await fetch('https://www.instagram.com/api/v1/accounts/confirm_email/', {
+                method : 'POST',
+                headers: igHeaders({ 'X-CSRFToken': csrf, 'Cookie': cookieStr }),
+                body   : encode({ code: code, email: state.email })
+            });
+            const data = await res.json();
+            log('   Confirmation : ' + JSON.stringify(data).substring(0, 100));
+        } catch(e) { log('⚠️ Confirmation : ' + e.message); }
+    }
+
+    state.status = 'done';
+    log('════════════════════════════');
+    log('🎉 TERMINÉ !');
+    log('📧 ' + state.email);
+    log('🔒 ' + state.password);
+    log('👤 @' + state.uName);
+    log('════════════════════════════');
 })();
