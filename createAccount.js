@@ -127,8 +127,8 @@ app.get('/', (req, res) => {
     document.getElementById('overlay').addEventListener('click', async function(e) {
       const img = document.getElementById('liveScreen');
       const rect = img.getBoundingClientRect();
-      const scaleX = 390 / rect.width;   // la fenêtre du bot fait 390px de large
-      const scaleY = 844 / rect.height;  // et 844px de haut
+      const scaleX = 1280 / rect.width;   // fenêtre desktop 1280px
+      const scaleY = 900 / rect.height;  // hauteur 900px
       const x = Math.round((e.clientX - rect.left) * scaleX);
       const y = Math.round((e.clientY - rect.top) * scaleY);
       document.getElementById('statusMsg').textContent = '🖱️ Clic à (' + x + ', ' + y + ')...';
@@ -314,8 +314,8 @@ async function fillReact(browser, el, val) {
     const opts = new chrome.Options();
     opts.setChromeBinaryPath(chromePath);
     opts.addArguments('--headless=new','--no-sandbox','--disable-dev-shm-usage',
-        '--window-size=390,844','--disable-blink-features=AutomationControlled','--lang=en-US,en');
-    opts.addArguments('--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1');
+        '--window-size=1280,900','--disable-blink-features=AutomationControlled','--lang=en-US,en');
+    opts.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
     opts.setUserPreferences({'intl.accept_languages':'en-US,en'});
 
     let browser = await new Builder().forBrowser('chrome').setChromeOptions(opts).setChromeService(service).build();
