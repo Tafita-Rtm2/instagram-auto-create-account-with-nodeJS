@@ -495,20 +495,27 @@ app.post('/inject-date-and-submit', async (req, res) => {
             await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
             await sleep(500);
 
-            // Trouver le bouton Submit via Selenium (type=submit ou texte "Submit")
+            // Trouver le bouton Submit — chercher button ET div[role=button]
             let submitBtn = null;
-            try {
-                submitBtn = await browserRef.findElement(By.xpath("//button[@type='submit']"));
-            } catch(e) {}
-            if (!submitBtn) {
+            const allBtnEls2 = await browserRef.findElements(By.css('button, div[role="button"], [role="button"]'));
+            console.log(`   Essai ${si+1} : ${allBtnEls2.length} bouton(s) trouvé(s)`);
+            for (let b of allBtnEls2) {
                 try {
-                    submitBtn = await browserRef.findElement(By.xpath("//button[normalize-space(text())='Submit' or normalize-space(text())='Next' or normalize-space(text())='Sign up']"));
+                    const txt  = (await b.getText()).trim().toLowerCase();
+                    const type = (await b.getAttribute('type') || '').toLowerCase();
+                    if (type === 'submit' || txt === 'submit' || txt === 'next') { submitBtn = b; break; }
                 } catch(e) {}
             }
             if (!submitBtn) {
-                // Dernier bouton dans le DOM
-                const allBtns = await browserRef.findElements(By.tagName('button'));
-                if (allBtns.length > 0) submitBtn = allBtns[allBtns.length - 1];
+                for (let b of allBtnEls2) {
+                    try {
+                        const txt  = (await b.getText()).trim();
+                        const rect = await browserRef.executeScript("var r=arguments[0].getBoundingClientRect(); return {w:r.width,h:r.height}", b);
+                        if (rect.w > 100 && rect.h > 30 && !txt.toLowerCase().includes('already')) {
+                            submitBtn = b; break;
+                        }
+                    } catch(e) {}
+                }
             }
 
             if (submitBtn) {
@@ -597,25 +604,49 @@ app.post('/do-submit', async (req, res) => {
         await sleep(800);
         state.screenshot = await browserRef.takeScreenshot();
 
-        // Trouver le bouton Submit
+        // Debug : lister tous les boutons dans le DOM
+        const btnDebug = await browserRef.executeScript(`
+            return Array.from(document.querySelectorAll('button,div[role="button"],[role="button"]')).map(function(b) {
+                var r = b.getBoundingClientRect();
+                return {
+                    tag: b.tagName,
+                    type: b.getAttribute('type'),
+                    role: b.getAttribute('role'),
+                    txt: b.textContent.trim().substring(0,30),
+                    x: Math.round(r.left + r.width/2),
+                    y: Math.round(r.top + r.height/2),
+                    w: Math.round(r.width),
+                    h: Math.round(r.height),
+                    visible: r.width > 0 && r.height > 0
+                };
+            });
+        `);
+        console.log('   Tous les boutons:', JSON.stringify(btnDebug));
+
+        // Trouver le bouton Submit — chercher parmi TOUS les boutons et div[role=button]
         let submitBtn = null;
-        try { submitBtn = await browserRef.findElement(By.xpath("//button[@type='submit']")); } catch(e) {}
-        if (!submitBtn) {
-            try { submitBtn = await browserRef.findElement(By.xpath("//button[contains(text(),'Submit') or contains(text(),'Next')]")); } catch(e) {}
+        const allBtnEls = await browserRef.findElements(By.css('button, div[role="button"], [role="button"]'));
+        for (let b of allBtnEls) {
+            try {
+                const txt = (await b.getText()).trim().toLowerCase();
+                const type = (await b.getAttribute('type') || '').toLowerCase();
+                if (type === 'submit' || txt === 'submit' || txt === 'next') { submitBtn = b; break; }
+            } catch(e) {}
         }
+        // Fallback : prendre le premier bouton large et visible qui n'est pas "I already have"
         if (!submitBtn) {
-            const btns = await browserRef.findElements(By.tagName('button'));
-            // Prendre le premier bouton visible (pas "I already have an account")
-            for (let b of btns) {
+            for (let b of allBtnEls) {
                 try {
                     const txt = (await b.getText()).trim();
-                    if (txt && !txt.includes('already') && !txt.includes('account')) { submitBtn = b; break; }
+                    const rect = await browserRef.executeScript("var r=arguments[0].getBoundingClientRect(); return {w:r.width,h:r.height,y:r.top}", b);
+                    if (rect.w > 100 && rect.h > 30 && !txt.toLowerCase().includes('already')) {
+                        submitBtn = b; break;
+                    }
                 } catch(e) {}
             }
-            if (!submitBtn && btns.length > 0) submitBtn = btns[0];
         }
 
-        if (!submitBtn) return res.json({ ok:false, msg:'❌ Bouton Submit introuvable dans le DOM' });
+        if (!submitBtn) return res.json({ ok:false, msg:'❌ Bouton Submit introuvable. Boutons trouvés: ' + JSON.stringify(btnDebug.slice(0,5)) });
 
         // Forcer le scroll vers le bouton
         await browserRef.executeScript("arguments[0].removeAttribute('disabled'); arguments[0].scrollIntoView({block:'center', behavior:'instant'});", submitBtn);
