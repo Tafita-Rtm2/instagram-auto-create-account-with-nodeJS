@@ -273,104 +273,106 @@ app.get('/screenshot', (req, res) => {
 });
 
 // ✅ Injection date + submit (avec scroll pour trouver le bouton)
+// ✅ Injection date via querySelector direct + React native setter
 app.post('/inject-date-and-submit', async (req, res) => {
     const { month, day, year } = req.body;
-    console.log(`📅 Injection date : ${day}/${month}/${year}`);
+    console.log(`📅 Injection date : jour=${day} mois=${month} année=${year}`);
     try {
         if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
 
-        // Scroll en haut pour voir tout le formulaire
-        await browserRef.executeScript("window.scrollTo(0,0);");
-        await sleep(500);
+        // Injecter la date via React sur TOUS les selects du DOM en une seule fois
+        const result = await browserRef.executeScript(`
+            var month = String(arguments[0]);
+            var day   = String(arguments[1]);
+            var year  = String(arguments[2]);
+            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
 
-        // Attendre que les 3 selects soient présents (max 10 tentatives)
-        let selects = [];
-        for (let i = 0; i < 10; i++) {
-            selects = await browserRef.findElements(By.tagName("select"));
-            console.log(`   Tentative ${i+1} : ${selects.length} select(s)`);
-            if (selects.length >= 3) break;
-            // Essayer de déclencher le blur sur le password pour faire apparaître les selects
-            if (i < 3) {
-                await browserRef.executeScript(`
-                    var inputs = document.querySelectorAll('input');
-                    for(var i=0;i<inputs.length;i++){
-                        if(inputs[i].type==='password'){
-                            inputs[i].focus();
-                            setTimeout(function(){ inputs[i].blur(); document.body.click(); }, 100);
-                            break;
-                        }
-                    }
-                `);
-            }
-            await sleep(1500);
-        }
-
-        if (selects.length < 3) {
-            return res.json({ ok:false, msg:`❌ Seulement ${selects.length} select(s) trouvé(s). Le formulaire n'est pas prêt.` });
-        }
-
-        // Injecter les valeurs dans les selects
-        const injectSel = async (sel, val) => {
-            return await browserRef.executeScript(`
-                var s=arguments[0], v=String(arguments[1]);
-                for(var i=0;i<s.options.length;i++){
-                    if(s.options[i].value===v || s.options[i].text.trim()===v){
-                        s.selectedIndex=i;
-                        Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype,'value').set.call(s,s.options[i].value);
-                        ['input','change','blur'].forEach(function(n){ s.dispatchEvent(new Event(n,{bubbles:true})); });
-                        return s.options[i].text;
+            function setSelect(sel, val) {
+                // Essayer par value d'abord
+                for (var i = 0; i < sel.options.length; i++) {
+                    if (sel.options[i].value === val || sel.options[i].text.trim() === val) {
+                        nativeSetter.call(sel, sel.options[i].value);
+                        sel.dispatchEvent(new Event('input',  {bubbles:true}));
+                        sel.dispatchEvent(new Event('change', {bubbles:true}));
+                        sel.dispatchEvent(new Event('blur',   {bubbles:true}));
+                        return sel.options[i].text;
                     }
                 }
                 return null;
-            `, sel, String(val));
-        };
+            }
 
-        // Détecter l'ordre Month/Day/Year
-        let opt1 = await browserRef.executeScript(`return arguments[0].options.length>1?arguments[0].options[1].text.trim():'';`, selects[0]);
-        let mFirst = /january|february|march|janvier|février|mars/i.test(opt1);
-        let [dI, mI, yI] = mFirst ? [1,0,2] : [0,1,2];
+            var selects = Array.from(document.querySelectorAll('select'));
+            if (selects.length === 0) return {ok:false, msg:'Aucun select trouvé'};
 
-        let r1 = await injectSel(selects[mI], month); await sleep(400);
-        let r2 = await injectSel(selects[dI], day);   await sleep(400);
-        let r3 = await injectSel(selects[yI], year);  await sleep(600);
-        console.log(`   ✅ Mois="${r1}" Jour="${r2}" Année="${r3}"`);
+            var results = [];
+            // Instagram : 1er select = Month, 2ème = Day, 3ème = Year
+            // Mais parfois il y en a qu'un seul de visible. On force tous.
+            if (selects.length >= 3) {
+                // Essayer de détecter l'ordre
+                var firstOpts = selects[0].options.length > 1 ? selects[0].options[1].text.trim() : '';
+                var monthFirst = /jan|feb|mar|jan|fév|mar/i.test(firstOpts);
+                var mI = monthFirst ? 0 : 1;
+                var dI = monthFirst ? 1 : 0;
+                var yI = 2;
+                results.push('month=' + setSelect(selects[mI], month));
+                results.push('day='   + setSelect(selects[dI], day));
+                results.push('year='  + setSelect(selects[yI], year));
+            } else {
+                // Un seul select visible : probablement le Month.
+                // Essayer de forcer React à rendre les autres en changeant le premier
+                var r = setSelect(selects[0], month);
+                results.push('first=' + r);
+                // Attendre un tick React
+                await new Promise(function(resolve){ setTimeout(resolve, 500); });
+                // Re-chercher les selects
+                selects = Array.from(document.querySelectorAll('select'));
+                results.push('count_after=' + selects.length);
+                if (selects.length >= 2) {
+                    results.push('day='  + setSelect(selects[1], day));
+                }
+                if (selects.length >= 3) {
+                    results.push('year=' + setSelect(selects[2], year));
+                }
+            }
+            return {ok:true, results: results, total: selects.length};
+        `, month, day, year);
 
-        if (!r1 || !r2 || !r3) {
-            return res.json({ ok:false, msg:`❌ Injection partielle (mois=${r1} jour=${r2} année=${r3})` });
-        }
-
+        console.log(`   Résultat JS : ${JSON.stringify(result)}`);
+        await sleep(500);
         state.screenshot = await browserRef.takeScreenshot();
 
-        // Trouver le bouton Submit — scroller si nécessaire
-        await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-        await sleep(800);
-
-        let btns = await browserRef.findElements(By.tagName("button"));
-        let submitBtn = null;
-        for (let b of btns) {
-            let t   = await b.getAttribute("type");
-            let txt = (await b.getText()).toLowerCase().replace(/\s+/g,' ').trim();
-            console.log(`   btn type="${t}" txt="${txt}"`);
-            if (t === "submit" || /^(submit|next|sign up|envoyer)$/.test(txt)) { submitBtn = b; break; }
-        }
-        // Fallback : prendre le dernier bouton
-        if (!submitBtn && btns.length > 0) {
-            submitBtn = btns[btns.length - 1];
-            console.log("   Fallback : dernier bouton");
+        if (!result || !result.ok) {
+            return res.json({ ok:false, msg: result ? result.msg : '❌ Erreur JS' });
         }
 
-        if (submitBtn) {
-            await browserRef.executeScript(`
-                arguments[0].removeAttribute('disabled');
-                arguments[0].scrollIntoView({block:'center'});
-            `, submitBtn);
-            await sleep(500);
-            await browserRef.executeScript("arguments[0].click();", submitBtn);
-            await sleep(3000);
-            state.screenshot = await browserRef.takeScreenshot();
-            state.status = 'waiting_code';
-            console.log("✅ Submit cliqué !");
-            res.json({ ok:true, msg:'✅ Date injectée et Submit cliqué !' });
+        // Cliquer Submit — chercher par type=submit ou texte, puis scrollIntoView
+        let submitClicked = await browserRef.executeScript(`
+            var btns = Array.from(document.querySelectorAll('button'));
+            var btn = null;
+            for (var i = 0; i < btns.length; i++) {
+                var t = btns[i].getAttribute('type');
+                var txt = btns[i].textContent.trim().toLowerCase();
+                if (t === 'submit' || txt === 'submit' || txt === 'next' || txt === 'sign up') {
+                    btn = btns[i]; break;
+                }
+            }
+            if (!btn && btns.length > 0) btn = btns[btns.length - 1];
+            if (btn) {
+                btn.removeAttribute('disabled');
+                btn.scrollIntoView({block:'center', behavior:'instant'});
+                btn.click();
+                return btn.textContent.trim();
+            }
+            return null;
+        `);
+
+        console.log(`   Submit cliqué : "${submitClicked}"`);
+        await sleep(3000);
+        state.screenshot = await browserRef.takeScreenshot();
+        state.status = 'waiting_code';
+
+        if (submitClicked) {
+            res.json({ ok:true, msg:`✅ Date injectée ! Submit cliqué ("${submitClicked}")` });
         } else {
             res.json({ ok:false, msg:'❌ Bouton Submit introuvable' });
         }
