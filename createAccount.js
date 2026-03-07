@@ -947,15 +947,6 @@ async function getFreeProxy() {
     const service = new chrome.ServiceBuilder(driverPath);
     const opts = new chrome.Options();
     opts.setChromeBinaryPath(chromePath);
-    // Récupérer un proxy rotatif
-    const proxy = await getFreeProxy();
-    if (proxy) {
-        opts.addArguments(`--proxy-server=http://${proxy}`);
-        console.log(`🌐 Chrome démarré avec proxy : ${proxy}`);
-    } else {
-        console.log(`🌐 Chrome sans proxy (IP directe)`);
-    }
-
     opts.addArguments('--headless=new','--no-sandbox','--disable-dev-shm-usage',
         '--window-size=1280,900','--disable-blink-features=AutomationControlled','--lang=en-US,en');
     opts.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
