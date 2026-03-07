@@ -439,20 +439,42 @@ app.post('/inject-date-and-submit', async (req, res) => {
             }
 
             if (submitBtn) {
+                // Supprimer disabled
+                await browserRef.executeScript("arguments[0].removeAttribute('disabled'); arguments[0].removeAttribute('aria-disabled');", submitBtn);
+                // Scroller vers le bouton et attendre
+                await browserRef.executeScript("arguments[0].scrollIntoView({block:'end',behavior:'instant'});", submitBtn);
+                await sleep(800);
+                state.screenshot = await browserRef.takeScreenshot();
+
+                // Obtenir les coordonnées réelles du bouton
+                const rect = await browserRef.executeScript(
+                    "var r=arguments[0].getBoundingClientRect(); return {x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2), w:Math.round(r.width), h:Math.round(r.height)};",
+                    submitBtn
+                );
+                console.log(`   Bouton coords : ${JSON.stringify(rect)}`);
+
+                // Méthode 1 : Selenium Actions (clic physique aux coordonnées)
                 try {
-                    // Supprimer disabled
-                    await browserRef.executeScript("arguments[0].removeAttribute('disabled'); arguments[0].removeAttribute('aria-disabled');", submitBtn);
-                    // Scroller vers le bouton
-                    await browserRef.executeScript("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", submitBtn);
-                    await sleep(600);
-                    state.screenshot = await browserRef.takeScreenshot();
-                    // Clic Selenium natif
-                    await submitBtn.click();
-                    console.log(`   ✅ Submit cliqué (essai ${si+1})`);
-                } catch(e) {
-                    // Si le clic échoue (ex: intercepté), forcer via JS
-                    await browserRef.executeScript("arguments[0].click();", submitBtn);
-                    console.log(`   Submit JS fallback (essai ${si+1}) : ${e.message}`);
+                    const { Builder, By: B, Key, until } = require('selenium-webdriver');
+                    await browserRef.actions().move({x: rect.x, y: rect.y}).click().perform();
+                    console.log(`   ✅ Clic Actions (${rect.x},${rect.y})`);
+                } catch(e1) {
+                    // Méthode 2 : Selenium click direct
+                    try {
+                        await submitBtn.click();
+                        console.log(`   ✅ Clic Selenium direct`);
+                    } catch(e2) {
+                        // Méthode 3 : JS click avec dispatchEvent
+                        await browserRef.executeScript(`
+                            var el = arguments[0];
+                            var x = arguments[1], y = arguments[2];
+                            el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, clientX:x, clientY:y, button:0}));
+                            el.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true, cancelable:true, clientX:x, clientY:y, button:0}));
+                            el.dispatchEvent(new MouseEvent('click',     {bubbles:true, cancelable:true, clientX:x, clientY:y, button:0}));
+                            el.click();
+                        `, submitBtn, rect.x, rect.y);
+                        console.log(`   ✅ Clic JS mousedown/up/click`);
+                    }
                 }
             } else {
                 console.log(`   Essai ${si+1} : aucun bouton trouvé`);
