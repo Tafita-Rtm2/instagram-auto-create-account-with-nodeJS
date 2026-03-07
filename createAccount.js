@@ -276,133 +276,139 @@ app.get('/screenshot', (req, res) => {
 // ✅ Injection date via querySelector direct + React native setter
 // ✅ Injection date — essaie toutes les formes possibles
 // ✅ Injection date via clic sur les vrais dropdowns React Instagram
+// ✅ Injection date via clic Selenium sur les vrais composants React
 app.post('/inject-date-and-submit', async (req, res) => {
     const { month, day, year } = req.body;
     const monthNum = parseInt(month);
-    console.log(`📅 Injection : jour=${day} mois=${month} année=${year}`);
+    const dayNum   = parseInt(day);
+    const yearNum  = parseInt(year);
+
+    const months_en = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const months_fr = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
+    const targetMonth = months_en[monthNum - 1];
+    const targetMonthFr = months_fr[monthNum - 1];
+
+    console.log(`📅 Clic date : ${targetMonth} ${dayNum} ${yearNum}`);
 
     try {
         if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
 
-        // ── Trouver les vrais selects de date par leur contenu ────────────────
-        // Instagram rend Month/Day/Year comme des <select> mais avec des aria-label
-        // ou on peut les trouver par leur position dans le DOM autour du label "Birthday"
-        const debugInfo = await browserRef.executeScript(`
-            // Chercher TOUS les selects et leurs options pour debug
-            var all = Array.from(document.querySelectorAll('select'));
-            var info = all.map(function(s, i) {
-                return {
-                    idx: i,
-                    opts: Array.from(s.options).map(function(o){ return {v:o.value, t:o.text.trim()}; }),
-                    aria: s.getAttribute('aria-label'),
-                    name: s.getAttribute('name'),
-                    id:   s.getAttribute('id'),
-                    class: s.className
-                };
+        // D'abord inspecter les vrais éléments Birthday dans le DOM
+        const domInfo = await browserRef.executeScript(`
+            // Chercher par aria-label ou role="combobox" ou role="listbox"
+            var combos = Array.from(document.querySelectorAll('[role="combobox"],[role="listbox"],[aria-label*="Month"],[aria-label*="Day"],[aria-label*="Year"],[aria-label*="Mois"],[aria-label*="Jour"],[aria-label*="Année"]'));
+            // Chercher le label Birthday et ses éléments enfants
+            var labels = Array.from(document.querySelectorAll('label,span,div')).filter(function(el){
+                return el.textContent.trim() === 'Birthday' || el.textContent.trim() === 'Anniversaire';
             });
-            // Aussi chercher les selects cachés ou via React fiber
-            var allEls = Array.from(document.querySelectorAll('*'));
-            var selectLike = allEls.filter(function(el){
-                return el.tagName === 'SELECT';
-            });
-            return { selects: info, total: all.length, selectLike: selectLike.length };
+            // Chercher tous les éléments avec tabindex dans la zone Birthday
+            var tabEls = Array.from(document.querySelectorAll('[tabindex]')).filter(function(el){
+                return el.tagName !== 'INPUT' && el.tagName !== 'BUTTON' && el.tagName !== 'SELECT' && el.tagName !== 'A';
+            }).map(function(el){
+                var r = el.getBoundingClientRect();
+                return { tag:el.tagName, aria:el.getAttribute('aria-label'), role:el.getAttribute('role'), x:Math.round(r.x), y:Math.round(r.y), w:Math.round(r.width), h:Math.round(r.height), text:el.textContent.trim().substring(0,30) };
+            }).filter(function(el){ return el.w > 50 && el.h > 20 && el.y > 100 && el.y < 600; });
+
+            return {
+                combos: combos.map(function(el){
+                    var r = el.getBoundingClientRect();
+                    return { aria:el.getAttribute('aria-label'), role:el.getAttribute('role'), x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2), text:el.textContent.trim().substring(0,20) };
+                }),
+                tabEls: tabEls
+            };
         `);
-        console.log(`   Debug selects: ${JSON.stringify(debugInfo)}`);
+        console.log(`   Combos : ${JSON.stringify(domInfo.combos)}`);
+        console.log(`   TabEls : ${JSON.stringify(domInfo.tabEls)}`);
 
-        // ── Stratégie : utiliser les Actions Selenium pour cliquer sur les dropdowns ──
-        // On connaît la position approximative des selects Month/Day/Year
-        // depuis le screenshot (ils sont dans la section Birthday)
-        
-        // D'abord, essayer via aria-label
-        const injectResult = await browserRef.executeScript(`
-            var monthNum = arguments[0];
-            var dayNum   = arguments[1];
-            var yearNum  = arguments[2];
-            
-            var months_en = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-            var months_fr = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
-            
-            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
-            
-            function setByAria(label, candidates) {
-                var sel = document.querySelector('select[aria-label="'+label+'"]');
-                if (!sel) return null;
-                for (var ci = 0; ci < candidates.length; ci++) {
-                    var v = String(candidates[ci]);
-                    for (var oi = 0; oi < sel.options.length; oi++) {
-                        if (sel.options[oi].value === v || sel.options[oi].text.trim().toLowerCase() === v.toLowerCase()) {
-                            nativeSetter.call(sel, sel.options[oi].value);
-                            ['input','change','blur'].forEach(function(n){ sel.dispatchEvent(new Event(n,{bubbles:true})); });
-                            return sel.options[oi].text.trim();
-                        }
-                    }
-                }
-                return 'aria_found_but_no_match';
-            }
-            
-            // Essayer avec différents aria-label possibles
-            var mResult = setByAria('Month', [months_en[monthNum-1], months_fr[monthNum-1], String(monthNum)])
-                       || setByAria('Mois',  [months_en[monthNum-1], months_fr[monthNum-1], String(monthNum)])
-                       || setByAria('month', [months_en[monthNum-1], months_fr[monthNum-1], String(monthNum)]);
-            
-            var dResult = setByAria('Day',  [String(dayNum)])
-                       || setByAria('Jour', [String(dayNum)])
-                       || setByAria('day',  [String(dayNum)]);
-            
-            var yResult = setByAria('Year',  [String(yearNum)])
-                       || setByAria('Année', [String(yearNum)])
-                       || setByAria('year',  [String(yearNum)]);
-            
-            // Si aria échoue, essayer par index (skip le 1er select = langue)
-            if (!mResult || !dResult || !yResult) {
-                var allSelects = Array.from(document.querySelectorAll('select'));
-                // Filtrer le select de langue (ses options contiennent des noms de langues)
-                var dateSelects = allSelects.filter(function(s) {
-                    var opts = Array.from(s.options).map(function(o){ return o.text.trim(); });
-                    // Le select de langue a des langues, pas des mois/jours
-                    var isLang = opts.some(function(t){ return /arabic|english|français|español|deutsch/i.test(t); });
-                    return !isLang;
-                });
-                
-                if (dateSelects.length >= 3) {
-                    var opt1 = dateSelects[0].options.length > 1 ? dateSelects[0].options[1].text.trim() : '';
-                    var monthFirst = /jan|fév/i.test(opt1);
-                    var mSel = dateSelects[monthFirst ? 0 : 1];
-                    var dSel = dateSelects[monthFirst ? 1 : 0];
-                    var ySel = dateSelects[2];
-                    
-                    function setOne(sel, candidates) {
-                        for (var ci = 0; ci < candidates.length; ci++) {
-                            var v = String(candidates[ci]);
-                            for (var oi = 0; oi < sel.options.length; oi++) {
-                                if (sel.options[oi].value === v || sel.options[oi].text.trim().toLowerCase() === v.toLowerCase()) {
-                                    nativeSetter.call(sel, sel.options[oi].value);
-                                    ['input','change','blur'].forEach(function(n){ sel.dispatchEvent(new Event(n,{bubbles:true})); });
-                                    return sel.options[oi].text.trim();
-                                }
-                            }
-                        }
-                        return 'no_match('+sel.options[1].text+')';
-                    }
-                    
-                    if (!mResult) mResult = setOne(mSel, [months_en[monthNum-1], months_fr[monthNum-1], String(monthNum)]);
-                    if (!dResult) dResult = setOne(dSel, [String(dayNum)]);
-                    if (!yResult) yResult = setOne(ySel, [String(yearNum)]);
-                }
-            }
-            
-            return { m: mResult||'null', d: dResult||'null', y: yResult||'null' };
-        `, monthNum, parseInt(day), parseInt(year));
+        // Trouver les dropdowns Month/Day/Year via leur aria-label
+        let monthEl = null, dayEl = null, yearEl = null;
 
-        console.log(`   Injection : m="${injectResult.m}" d="${injectResult.d}" y="${injectResult.y}"`);
-        await sleep(600);
-        state.screenshot = await browserRef.takeScreenshot();
-
-        // Vérifier que ça a marché
-        const failed = !injectResult.m || injectResult.m.startsWith('null') || injectResult.m.includes('no_match') || injectResult.m.includes('FAILED');
-        if (failed) {
-            return res.json({ ok:false, msg:`❌ m=${injectResult.m} | d=${injectResult.d} | y=${injectResult.y}` });
+        const allCombos = domInfo.combos || [];
+        for (let el of allCombos) {
+            if (/month|mois/i.test(el.aria)) monthEl = el;
+            else if (/day|jour/i.test(el.aria)) dayEl = el;
+            else if (/year|ann/i.test(el.aria)) yearEl = el;
         }
+
+        // Si pas trouvé via aria, utiliser les tabEls positionnés (les 3 dropdowns sont côte à côte)
+        if (!monthEl || !dayEl || !yearEl) {
+            const tabEls = (domInfo.tabEls || []).filter(el => el.w > 80 && el.h > 30);
+            // Trier par x pour avoir Month (gauche), Day (milieu), Year (droite)
+            tabEls.sort((a, b) => a.x - b.x);
+            if (tabEls.length >= 3) {
+                if (!monthEl) monthEl = tabEls[0];
+                if (!dayEl)   dayEl   = tabEls[1];
+                if (!yearEl)  yearEl  = tabEls[2];
+            }
+        }
+
+        console.log(`   Month@(${monthEl?.x},${monthEl?.y}) Day@(${dayEl?.x},${dayEl?.y}) Year@(${yearEl?.x},${yearEl?.y})`);
+
+        if (!monthEl || !dayEl || !yearEl) {
+            return res.json({ ok:false, msg:`❌ Dropdowns introuvables. Combos:${allCombos.length}` });
+        }
+
+        // Fonction pour cliquer sur un dropdown et sélectionner une option
+        async function clickDropdownAndSelect(dropX, dropY, optionText) {
+            // Cliquer sur le dropdown pour l'ouvrir
+            await browserRef.executeScript(`
+                var el = document.elementFromPoint(arguments[0], arguments[1]);
+                if (el) { el.click(); el.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:arguments[0],clientY:arguments[1]})); }
+            `, dropX, dropY);
+            await sleep(800);
+
+            // Chercher l'option dans le menu ouvert (listbox/option)
+            const selected = await browserRef.executeScript(`
+                var target = arguments[0];
+                var targets = [target, String(parseInt(target))];
+                // Chercher dans les options du menu ouvert
+                var options = Array.from(document.querySelectorAll('[role="option"],[role="listitem"],li,div[class*="option"]'));
+                for (var i = 0; i < options.length; i++) {
+                    var txt = options[i].textContent.trim();
+                    for (var j = 0; j < targets.length; j++) {
+                        if (txt === targets[j] || txt.toLowerCase() === targets[j].toLowerCase()) {
+                            options[i].scrollIntoView({block:'center'});
+                            options[i].click();
+                            return txt;
+                        }
+                    }
+                }
+                // Si pas de menu ouvert, essayer le select natif juste après le clic
+                return null;
+            `, String(optionText));
+
+            if (!selected) {
+                // Peut-être que c'est un vrai select natif qui s'est ouvert — utiliser sendKeys
+                try {
+                    const { Key } = require('selenium-webdriver');
+                    const el = await browserRef.findElement(By.css(':focus'));
+                    if (el) {
+                        await el.sendKeys(String(optionText).charAt(0));
+                        await sleep(300);
+                    }
+                } catch(e) {}
+            }
+            await sleep(500);
+            return selected;
+        }
+
+        // Cliquer Month
+        let mRes = await clickDropdownAndSelect(monthEl.x, monthEl.y, targetMonth);
+        if (!mRes) mRes = await clickDropdownAndSelect(monthEl.x, monthEl.y, targetMonthFr);
+        console.log(`   Month cliqué : "${mRes}"`);
+        await sleep(300);
+
+        // Cliquer Day
+        let dRes = await clickDropdownAndSelect(dayEl.x, dayEl.y, String(dayNum));
+        console.log(`   Day cliqué : "${dRes}"`);
+        await sleep(300);
+
+        // Cliquer Year
+        let yRes = await clickDropdownAndSelect(yearEl.x, yearEl.y, String(yearNum));
+        console.log(`   Year cliqué : "${yRes}"`);
+        await sleep(800);
+
+        state.screenshot = await browserRef.takeScreenshot();
 
         // Submit
         const submitRes = await browserRef.executeScript(`
@@ -426,7 +432,7 @@ app.post('/inject-date-and-submit', async (req, res) => {
         await sleep(3000);
         state.screenshot = await browserRef.takeScreenshot();
         state.status = 'waiting_code';
-        res.json({ ok:true, msg:`✅ ${injectResult.m}/${injectResult.d}/${injectResult.y} — soumis !` });
+        res.json({ ok:true, msg:`✅ ${mRes||'?'}/${dRes||'?'}/${yRes||'?'} — Submit !` });
 
     } catch(e) {
         console.error("❌ inject : " + e.message);
