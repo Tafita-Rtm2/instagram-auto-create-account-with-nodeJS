@@ -1,9 +1,10 @@
 {
   "name": "create-instagram-account",
   "version": "1.0.0",
-  "description": "",
+  "description": "Instagram Bot on Render",
   "main": "createAccount.js",
   "scripts": {
+    "start": "node createAccount.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "Alan H",
@@ -11,7 +12,6 @@
   "dependencies": {
     "axios": "^0.20.0",
     "cheerio": "^1.0.0-rc.3",
-    "chromedriver": "^86.0.0",
     "lodash": "^4.17.20",
     "node-fetch": "^2.6.1",
     "random-username-generator": "^1.0.4",
