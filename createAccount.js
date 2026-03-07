@@ -11,7 +11,7 @@ const port = process.env.PORT || 10000;
 app.get('/', (req, res) => {
     if (fs.existsSync('error_screenshot.png')) {
         res.send('<h1>Aperçu du Bot</h1><img src="/debug-image" style="width:100%;max-width:500px;">');
-    } else { res.send('Bot en cours...'); }
+    } else { res.send('Bot actif - En attente...'); }
 });
 app.get('/debug-image', (req, res) => { res.sendFile(path.join(process.cwd(), 'error_screenshot.png')); });
 app.listen(port, '0.0.0.0');
@@ -24,13 +24,13 @@ async function getFakeMail() {
         const body = await response.text();
         const $ = cheerio.load(body);
         return $("#email_ch_text").text().trim();
-    } catch (e) { return "alan" + Math.floor(Math.random()*9999) + "@risma.mom"; }
+    } catch (e) { return "alan" + Math.floor(Math.random()*9999) + "@mail.com"; }
 }
 
 async function humanType(element, text) {
     for (let char of text) {
         await element.sendKeys(char);
-        await sleep(Math.random() * 50 + 20);
+        await sleep(Math.random() * 40 + 20);
     }
 }
 
@@ -48,77 +48,71 @@ async function humanType(element, text) {
     let browser = await new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(service).build();
 
     try {
-        console.log("Accès à Instagram...");
+        console.log("Navigation vers Instagram...");
         await browser.get("https://www.instagram.com/accounts/signup/email/");
-        await sleep(7000);
+        await sleep(8000); // Temps de chargement pour Render
 
-        // --- 1. EMAIL ---
-        let emailInput = await browser.wait(until.elementLocated(By.name("emailOrPhone")), 15000);
+        // --- STRATÉGIE DE RECHERCHE DYNAMIQUE ---
+        console.log("Recherche des champs du formulaire...");
+        let inputs = await browser.findElements(By.tagName("input"));
+        
+        if (inputs.length === 0) {
+            console.log("Aucun champ trouvé, tentative de rafraîchissement...");
+            await browser.navigate().refresh();
+            await sleep(5000);
+            inputs = await browser.findElements(By.tagName("input"));
+        }
+
+        // 1. EMAIL (C'est souvent le 1er ou le 2ème input)
         let mail = await getFakeMail();
         console.log("Saisie Email : " + mail);
-        await emailInput.click();
-        await humanType(emailInput, mail);
+        await inputs[0].click();
+        await humanType(inputs[0], mail);
         await sleep(1000);
-        await emailInput.sendKeys(Key.TAB);
-        await sleep(2000);
+        await inputs[0].sendKeys(Key.TAB);
 
-        // --- 2. PASSWORD ---
+        // 2. PASSWORD
         console.log("Saisie Password...");
-        let passInput = await browser.wait(until.elementLocated(By.xpath("//input[@type='password']")), 15000);
+        let passInput = await browser.wait(until.elementLocated(By.xpath("//input[@type='password']")), 10000);
         await humanType(passInput, "Azerty12345!");
         await sleep(1000);
-        await passInput.sendKeys(Key.TAB);
 
-        // --- 3. DATE ---
+        // 3. DATE
         console.log("Saisie Date...");
         let selects = await browser.findElements(By.tagName("select"));
         if(selects.length >= 3) {
             await selects[0].sendKeys("March");
-            await selects[1].sendKeys("15");
-            await selects[2].sendKeys("1996", Key.ENTER); // On appuie sur Entrée ici
+            await selects[1].sendKeys("10");
+            await selects[2].sendKeys("1994", Key.ENTER);
         }
-        await sleep(3000); // On attend plus longtemps que le formulaire réagisse
+        await sleep(3000);
 
-        // --- 4. SCROLL ET CLIC DE RÉVEIL ---
-        console.log("Défilement et réveil...");
-        await browser.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-        await sleep(1000);
-
-        // --- 5. NOM & USER ---
-        console.log("Saisie Identité...");
-        // On cherche le champ qui n'est pas l'email et pas le password
-        let inputs = await browser.findElements(By.tagName("input"));
-        
-        for(let input of inputs) {
-            let nameAttr = await input.getAttribute("name");
-            if(nameAttr === "fullName") {
-                await input.click();
-                await humanType(input, "Alan Azad");
-                console.log("Nom saisi.");
-            }
-            if(nameAttr === "username") {
-                await input.click();
-                await humanType(input, "azad_bot_" + Math.floor(Math.random()*99999));
-                console.log("Username saisi.");
-            }
+        // 4. NOM COMPLET & USERNAME
+        console.log("Finalisation identité...");
+        // On rafraîchit la liste des inputs car le formulaire a pu changer
+        let finalInputs = await browser.findElements(By.tagName("input"));
+        for(let input of finalInputs) {
+            let name = await input.getAttribute("name");
+            if(name === "fullName") await humanType(input, "Alan Azad");
+            if(name === "username") await humanType(input, "azad_alan_" + Math.floor(Math.random()*9999));
         }
 
         // Screenshot final
-        await sleep(3000);
-        let finalImg = await browser.takeScreenshot();
-        fs.writeFileSync('error_screenshot.png', finalImg, 'base64');
+        await sleep(2000);
+        let pic = await browser.takeScreenshot();
+        fs.writeFileSync('error_screenshot.png', pic, 'base64');
 
-        // --- 6. VALIDATION ---
+        // 5. VALIDATION
         let submitBtn = await browser.wait(until.elementLocated(By.xpath("//button[@type='submit']")), 10000);
         await submitBtn.click();
-        console.log("Succès : Formulaire envoyé !");
+        console.log("Formulaire envoyé avec succès !");
 
     } catch (e) {
-        console.error("ERREUR : " + e.message);
-        let errImg = await browser.takeScreenshot();
-        fs.writeFileSync('error_screenshot.png', errImg, 'base64');
+        console.error("ERREUR GÉNÉRALE : " + e.message);
+        let img = await browser.takeScreenshot();
+        fs.writeFileSync('error_screenshot.png', img, 'base64');
     } finally {
-        await sleep(20000);
+        await sleep(15000);
         await browser.quit();
     }
 })();
