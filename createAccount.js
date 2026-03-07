@@ -104,7 +104,12 @@ app.get('/', (req, res) => {
     .badge{display:inline-block;background:#e1306c;color:#fff;border-radius:20px;padding:3px 10px;font-size:12px;font-weight:bold;margin-left:6px}
     .ip-info{background:#e8f4fd;border:1px solid #bee3f8;border-radius:8px;padding:10px;margin-bottom:10px;font-size:12px;color:#2c5282}
     .counter{text-align:center;font-size:13px;color:#888;margin-top:4px}
+    #step-captcha{display:none}
+    .cap-ttl{font-size:15px;font-weight:bold;color:#856404;margin-bottom:6px}
+    .cap-sub{font-size:12px;color:#666;margin-bottom:10px}
+    .cap-wrap{display:flex;justify-content:center;margin:10px 0}
   </style>
+  <script src="https://js.hcaptcha.com/1/api.js?hl=fr" async defer></script>
 </head>
 <body>
   <div class="hdr">🤖 Bot Instagram — IP Utilisateur</div>
@@ -159,6 +164,15 @@ app.get('/', (req, res) => {
       <div class="st wa" id="st-create">Choisis la date de naissance</div>
     </div>
 
+
+    <!-- Captcha hCaptcha -->
+    <div class="card" id="step-captcha" style="background:#fff8e1;border:2px solid #ffc107">
+      <div class="cap-ttl">🔒 Vérification de sécurité</div>
+      <p class="cap-sub">Instagram demande une vérification. Résous le captcha ci-dessous puis clique sur Continuer.</p>
+      <div class="cap-wrap"><div class="h-captcha" data-sitekey="4c672d35-0701-42b2-88c3-78380b0db560" id="hcaptcha-box"></div></div>
+      <button class="btn" style="background:linear-gradient(135deg,#f77737,#e1306c);margin-top:8px" id="btnCaptcha" onclick="submitCaptcha()">✅ Continuer</button>
+      <div class="st wa" id="st-captcha">Résous le captcha puis clique Continuer</div>
+    </div>
     <!-- Étape 2 : code de confirmation -->
     <div class="card" id="step-code" style="display:none">
       <div class="ttl">📧 Code de confirmation <span class="badge" id="code-timer">...</span></div>
@@ -252,9 +266,10 @@ async function regenInfos() { await init(); }
 
 // ─── Compte suivant ───────────────────────────────────────────────────────────
 async function nextAccount() {
-    document.getElementById('step-done').style.display  = 'none';
-    document.getElementById('step-date').style.display  = 'block';
-    document.getElementById('step-code').style.display  = 'none';
+    document.getElementById('step-done').style.display     = 'none';
+    document.getElementById('step-captcha').style.display  = 'none';
+    document.getElementById('step-code').style.display     = 'none';
+    document.getElementById('step-date').style.display     = 'block';
     document.getElementById('btnCreate').disabled = false;
 
     // Si on a atteint la limite → forcer changement IP
@@ -401,12 +416,16 @@ async function createAccount() {
     }
 
     if (verData.require_captcha) {
-        L('⚠️ CAPTCHA sur cette IP !', 'warn');
-        setSt('st-create', '⚠️ Instagram bloque cette IP. Passe en 4G ou change de WiFi !', 'er');
+        L('🔒 Captcha requis — affichage widget hCaptcha...', 'warn');
+        setSt('st-create', '🔒 Résous le captcha pour continuer !', 'wa');
         document.getElementById('btnCreate').disabled = false;
-        // Forcer un changement IP au prochain essai
-        accountsOnThisIP = MAX_PER_IP;
-        localStorage.setItem('acct_count', MAX_PER_IP);
+        // Afficher la carte captcha
+        document.getElementById('step-date').style.display = 'none';
+        document.getElementById('step-captcha').style.display = 'block';
+        // Reset hCaptcha si déjà utilisé
+        if (typeof hcaptcha !== 'undefined') {
+            try { hcaptcha.reset(); } catch(e) {}
+        }
         return;
     }
     if (!verData.email_sent) {
@@ -415,13 +434,70 @@ async function createAccount() {
         document.getElementById('btnCreate').disabled = false;
         return;
     }
+    showCodeStep();
+}
 
+// ─── Afficher la carte code ───────────────────────────────────────────────────
+function showCodeStep() {
     L('✅ Code envoyé à ' + acct.email);
     document.getElementById('d-email2').textContent = acct.email;
     document.getElementById('step-date').style.display = 'none';
+    document.getElementById('step-captcha').style.display = 'none';
     document.getElementById('step-code').style.display = 'block';
     setSt('st-code', 'Code envoyé ! Récupération auto...', 'in');
     startCodePolling();
+}
+
+// ─── Soumettre le captcha et relancer send_verify_email ───────────────────────
+async function submitCaptcha() {
+    // Récupérer le token hCaptcha
+    let captchaToken = '';
+    try {
+        const textarea = document.querySelector('#hcaptcha-box textarea[name="h-captcha-response"]') ||
+                         document.querySelector('textarea[name="h-captcha-response"]');
+        if (textarea) captchaToken = textarea.value;
+    } catch(e) {}
+
+    if (!captchaToken) {
+        setSt('st-captcha', '⚠️ Résous le captcha d\'abord !', 'er');
+        return;
+    }
+
+    document.getElementById('btnCaptcha').disabled = true;
+    setSt('st-captcha', '⏳ Envoi avec token captcha...', 'wa');
+    L('🔒 Envoi captcha token : ' + captchaToken.substring(0,20) + '...');
+
+    // Renvoyer send_verify_email avec le captcha_token
+    let verData;
+    const bodyWithCaptcha = encode({ device_id: mid, email: acct.email, captcha_token: captchaToken });
+    try {
+        const r = await fetch('https://i.instagram.com/api/v1/accounts/send_verify_email/', {
+            method:'POST',
+            headers:{ 'Content-Type':'application/x-www-form-urlencoded','X-CSRFToken':csrf,'X-Requested-With':'XMLHttpRequest','Referer':'https://www.instagram.com/' },
+            body: bodyWithCaptcha,
+            credentials: 'include'
+        });
+        verData = await r.json();
+        L('   Verify+captcha : ' + JSON.stringify(verData).substring(0,100));
+    } catch(e) {
+        L('   ⚠️ CORS — proxy...', 'warn');
+        const pr = await fetch('/api/proxy', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url:'https://i.instagram.com/api/v1/accounts/send_verify_email/', body: bodyWithCaptcha, csrf, cookieStr, referer:'https://www.instagram.com/' }) });
+        verData = await pr.json();
+        L('   Verify+captcha proxy : ' + JSON.stringify(verData).substring(0,100));
+    }
+
+    document.getElementById('btnCaptcha').disabled = false;
+
+    if (verData.require_captcha) {
+        setSt('st-captcha', '❌ Captcha refusé — réessaie', 'er');
+        try { hcaptcha.reset(); } catch(e) {}
+        return;
+    }
+    if (!verData.email_sent) {
+        setSt('st-captcha', '❌ ' + JSON.stringify(verData).substring(0,60), 'er');
+        return;
+    }
+    showCodeStep();
 }
 
 // ─── Polling code email ───────────────────────────────────────────────────────
