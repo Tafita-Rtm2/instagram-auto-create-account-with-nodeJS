@@ -587,63 +587,76 @@ app.post('/inject-date-and-submit', async (req, res) => {
     }
 });
 
-// Route /do-submit — clic manuel sur le bouton Submit Instagram
+// Route /do-submit — clic sur Submit Instagram
 app.post('/do-submit', async (req, res) => {
     try {
         if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
 
-        let clicked = false;
-        for (let si = 0; si < 5; si++) {
-            // Scroll en bas
-            await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
-            await sleep(600);
+        // Scroll en bas pour voir le bouton
+        await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
+        await sleep(800);
+        state.screenshot = await browserRef.takeScreenshot();
 
-            // Trouver bouton Submit
-            let submitBtn = null;
-            try { submitBtn = await browserRef.findElement(By.xpath("//button[@type='submit']")); } catch(e) {}
-            if (!submitBtn) {
-                try { submitBtn = await browserRef.findElement(By.xpath("//button[normalize-space(.)='Submit' or normalize-space(.)='Next']")); } catch(e) {}
-            }
-            if (!submitBtn) {
-                const btns = await browserRef.findElements(By.tagName('button'));
-                if (btns.length > 0) submitBtn = btns[btns.length - 1];
-            }
-
-            if (submitBtn) {
-                await browserRef.executeScript("arguments[0].removeAttribute('disabled'); arguments[0].scrollIntoView({block:'center',behavior:'instant'});", submitBtn);
-                await sleep(500);
-                // Clic via Actions (le plus fiable)
+        // Trouver le bouton Submit
+        let submitBtn = null;
+        try { submitBtn = await browserRef.findElement(By.xpath("//button[@type='submit']")); } catch(e) {}
+        if (!submitBtn) {
+            try { submitBtn = await browserRef.findElement(By.xpath("//button[contains(text(),'Submit') or contains(text(),'Next')]")); } catch(e) {}
+        }
+        if (!submitBtn) {
+            const btns = await browserRef.findElements(By.tagName('button'));
+            // Prendre le premier bouton visible (pas "I already have an account")
+            for (let b of btns) {
                 try {
-                    await browserRef.actions({async: true}).move({origin: submitBtn}).click().perform();
-                    console.log(`   ✅ do-submit Actions clic (essai ${si+1})`);
-                } catch(e) {
-                    await browserRef.executeScript("arguments[0].click();", submitBtn);
-                    console.log(`   ✅ do-submit JS clic (essai ${si+1})`);
-                }
-                clicked = true;
-                await sleep(3000);
-                state.screenshot = await browserRef.takeScreenshot();
-                const url = await browserRef.getCurrentUrl();
-                console.log(`   URL : ${url}`);
-                if (!url.includes('emailsignup')) {
-                    state.status = 'waiting_code';
-                    return res.json({ ok:true, msg:'✅ Compte soumis ! En attente du code...' });
-                }
-                // Vérifier champ code sur même page
-                try {
-                    await browserRef.findElement(By.xpath("//input[@inputmode='numeric' or @name='confirmationCode']"));
-                    state.status = 'waiting_code';
-                    return res.json({ ok:true, msg:'✅ Code demandé !' });
+                    const txt = (await b.getText()).trim();
+                    if (txt && !txt.includes('already') && !txt.includes('account')) { submitBtn = b; break; }
                 } catch(e) {}
             }
-            await sleep(1000);
+            if (!submitBtn && btns.length > 0) submitBtn = btns[0];
         }
-        if (clicked) {
-            state.status = 'waiting_code';
-            res.json({ ok:true, msg:'⚠️ Submit cliqué — vérifie le screenshot' });
-        } else {
-            res.json({ ok:false, msg:'❌ Bouton Submit introuvable' });
+
+        if (!submitBtn) return res.json({ ok:false, msg:'❌ Bouton Submit introuvable dans le DOM' });
+
+        // Forcer le scroll vers le bouton
+        await browserRef.executeScript("arguments[0].removeAttribute('disabled'); arguments[0].scrollIntoView({block:'center', behavior:'instant'});", submitBtn);
+        await sleep(800);
+        state.screenshot = await browserRef.takeScreenshot();
+
+        // Obtenir les coords et cliquer via JS pur (le plus fiable en headless)
+        const clickResult = await browserRef.executeScript(`
+            var btn = arguments[0];
+            btn.removeAttribute('disabled');
+            btn.removeAttribute('aria-disabled');
+            var rect = btn.getBoundingClientRect();
+            var cx = rect.left + rect.width/2;
+            var cy = rect.top + rect.height/2;
+            // Simuler tous les events d'un vrai clic
+            ['mouseover','mouseenter','mousemove','mousedown','mouseup','click','pointerdown','pointerup','pointercancel'].forEach(function(type) {
+                btn.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0}));
+            });
+            btn.click();
+            return {txt: btn.textContent.trim(), x: Math.round(cx), y: Math.round(cy), disabled: !!btn.disabled};
+        `, submitBtn);
+
+        console.log(`✅ do-submit clic : ${JSON.stringify(clickResult)}`);
+        await sleep(4000);
+        state.screenshot = await browserRef.takeScreenshot();
+
+        const url = await browserRef.getCurrentUrl();
+        console.log(`   URL après clic : ${url}`);
+
+        // Vérifier si page changée ou champ code apparu
+        let success = !url.includes('emailsignup');
+        if (!success) {
+            try {
+                await browserRef.findElement(By.xpath("//input[@inputmode='numeric' or @name='confirmationCode']"));
+                success = true;
+            } catch(e) {}
         }
+
+        state.status = 'waiting_code';
+        res.json({ ok: true, msg: success ? '✅ Compte soumis !' : '⚠️ Submit cliqué — vérifie le screenshot' });
+
     } catch(e) {
         console.error("❌ do-submit : " + e.message);
         res.json({ ok:false, msg:'❌ ' + e.message });
@@ -851,8 +864,23 @@ async function fillReact(browser, el, val) {
             await sleep(2000); waited += 2;
         }
 
+        // Si timeout mais le submit a déjà été tenté (ready_for_submit) → attendre encore
+        if (state.status === 'ready_for_submit') {
+            console.log("⏳ En attente du clic Submit manuel...");
+            let ws = 0;
+            while (state.status === 'ready_for_submit' && ws < 600) { await sleep(2000); ws += 2; }
+        }
+
         if (state.status !== 'waiting_code') {
-            state.status = 'error'; state.errorMsg = 'Timeout : pas de réponse';
+            // Ne pas mettre en erreur — passer en ready_for_submit pour que l'utilisateur puisse cliquer
+            console.log("⚠️ Timeout date — passage en ready_for_submit");
+            state.status = 'ready_for_submit';
+            let ws2 = 0;
+            while (state.status === 'ready_for_submit' && ws2 < 600) { await sleep(2000); ws2 += 2; }
+        }
+
+        if (state.status !== 'waiting_code') {
+            state.status = 'error'; state.errorMsg = 'Timeout final';
             clearInterval(liveLoop); return;
         }
 
