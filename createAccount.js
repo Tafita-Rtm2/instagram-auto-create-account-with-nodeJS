@@ -79,46 +79,59 @@ function encode(obj) {
         .join('&');
 }
 
-// Récupérer le CSRF token depuis la page Instagram
+// Récupérer CSRF + tous les cookies nécessaires
 async function getCsrfAndCookie() {
     try {
         const res = await fetch('https://www.instagram.com/accounts/emailsignup/', {
             headers: {
-                'User-Agent'     : 'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                'User-Agent'     : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Sec-Fetch-Site' : 'none',
+                'Sec-Fetch-Mode' : 'navigate',
             }
         });
 
-        // Extraire tous les cookies
         const rawCookies = res.headers.raw()['set-cookie'] || [];
-        const cookieParts = rawCookies.map(function(c) { return c.split(';')[0]; });
-        const cookieStr   = cookieParts.join('; ');
-
-        // Extraire le csrftoken
-        let csrf = '';
+        const cookieMap  = {};
         for (const c of rawCookies) {
-            const m = c.match(/csrftoken=([^;]+)/);
-            if (m) { csrf = m[1]; break; }
+            const part = c.split(';')[0];
+            const idx  = part.indexOf('=');
+            if (idx > 0) {
+                const k = part.substring(0, idx).trim();
+                const v = part.substring(idx + 1).trim();
+                cookieMap[k] = v;
+            }
         }
 
-        // Fallback dans le HTML
+        let csrf = cookieMap['csrftoken'] || '';
+
+        // Fallback dans le HTML si pas dans les cookies
         if (!csrf) {
             const html = await res.text();
-            const m2   = html.match(/"csrf_token"\s*:\s*"([^"]+)"/);
-            if (m2) csrf = m2[1];
+            const m = html.match(/"csrf_token"\s*:\s*"([^"]+)"/);
+            if (m) csrf = m[1];
+            // Autre pattern possible
+            if (!csrf) {
+                const m2 = html.match(/csrftoken=([a-zA-Z0-9]+)/);
+                if (m2) csrf = m2[1];
+            }
         }
 
-        log('   🔐 CSRF : ' + (csrf ? csrf.substring(0, 10) + '...' : 'non trouvé'));
-        return { csrf, cookieStr };
+        const cookieStr = Object.entries(cookieMap).map(function(e){ return e[0]+'='+e[1]; }).join('; ');
+        log('   🔐 CSRF : ' + (csrf ? csrf.substring(0, 10) + '...' : 'NON TROUVÉ'));
+        log('   🍪 Cookies : ' + Object.keys(cookieMap).join(', '));
+        return { csrf, cookieStr, cookieMap };
     } catch(e) {
         log('⚠️ getCsrf : ' + e.message);
-        return { csrf: '', cookieStr: '' };
+        return { csrf: '', cookieStr: '', cookieMap: {} };
     }
 }
 
-// Créer le compte via l'API privée Instagram
+// Créer le compte via l'endpoint web réel d'Instagram
 async function createIgAccount(csrf, cookieStr, month, day, year) {
+    // Endpoint correct (celui que le vrai navigateur utilise)
+    const url  = 'https://www.instagram.com/accounts/web_create_ajax/attempt/';
     const body = encode({
         enc_password          : '#PWD_INSTAGRAM_BROWSER:0:' + Date.now() + ':' + state.password,
         email                 : state.email,
@@ -131,22 +144,33 @@ async function createIgAccount(csrf, cookieStr, month, day, year) {
         seamless_login_enabled: '1',
         tos_version           : 'row',
         force_sign_in_page    : '0',
+        suggestedUsername     : '',
+        do_not_send_sms       : 'false',
     });
 
-    const res  = await fetch('https://www.instagram.com/api/v1/web/accounts/register/', {
-        method : 'POST',
-        headers: igHeaders({
-            'X-CSRFToken': csrf,
-            'Cookie'     : cookieStr || ('csrftoken=' + csrf),
-        }),
-        body   : body
-    });
+    const headers = {
+        'User-Agent'      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept'          : '*/*',
+        'Accept-Language' : 'en-US,en;q=0.9',
+        'Content-Type'    : 'application/x-www-form-urlencoded',
+        'X-CSRFToken'     : csrf,
+        'X-Instagram-AJAX': '1',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin'          : 'https://www.instagram.com',
+        'Referer'         : 'https://www.instagram.com/accounts/emailsignup/',
+        'Sec-Fetch-Dest'  : 'empty',
+        'Sec-Fetch-Mode'  : 'cors',
+        'Sec-Fetch-Site'  : 'same-origin',
+        'Cookie'          : cookieStr,
+    };
 
+    log('   📡 POST ' + url);
+    const res  = await fetch(url, { method: 'POST', headers, body });
     const text = await res.text();
-    log('   📡 HTTP ' + res.status + ' : ' + text.substring(0, 200));
+    log('   📡 HTTP ' + res.status + ' : ' + text.substring(0, 300));
 
     try { return JSON.parse(text); }
-    catch(e) { return { error: text }; }
+    catch(e) { return { error: text.substring(0, 200) }; }
 }
 
 // ─── SERVEUR EXPRESS ──────────────────────────────────────────────────────────
@@ -366,7 +390,7 @@ app.post('/create', async function(req, res) {
     try {
         // 1. Obtenir CSRF + cookies
         log('🔐 Récupération CSRF...');
-        const { csrf, cookieStr } = await getCsrfAndCookie();
+        const { csrf, cookieStr, cookieMap } = await getCsrfAndCookie();
         if (!csrf) {
             state.status = 'ready';
             return res.json({ ok: false, msg: '❌ CSRF introuvable — réessaie' });
@@ -377,7 +401,16 @@ app.post('/create', async function(req, res) {
         try {
             const chkRes  = await fetch('https://www.instagram.com/api/v1/users/check_username/', {
                 method : 'POST',
-                headers: igHeaders({ 'X-CSRFToken': csrf, 'Cookie': cookieStr }),
+                headers: {
+                    'User-Agent'      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Content-Type'    : 'application/x-www-form-urlencoded',
+                    'X-CSRFToken'     : csrf,
+                    'X-Instagram-AJAX': '1',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Origin'          : 'https://www.instagram.com',
+                    'Referer'         : 'https://www.instagram.com/accounts/emailsignup/',
+                    'Cookie'          : cookieStr,
+                },
                 body   : encode({ username: state.uName })
             });
             const chkData = await chkRes.json();
@@ -385,7 +418,7 @@ app.post('/create', async function(req, res) {
                 state.uName = username();
                 log('🔄 Username pris → ' + state.uName);
             }
-        } catch(e) {}
+        } catch(e) { log('⚠️ checkUsername : ' + e.message); }
 
         // 3. Créer le compte
         log('📡 Envoi requête création...');
