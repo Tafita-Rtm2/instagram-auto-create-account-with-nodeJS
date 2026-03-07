@@ -3,113 +3,128 @@ const chrome = require('selenium-webdriver/chrome');
 const path = require('path');
 const express = require('express');
 const fs = require('fs');
+const cheerio = require("cheerio");
+const fetch = require('node-fetch');
+const _ = require('lodash');
 
-// --- SERVEUR DE MONITORING POUR RENDER ---
+// --- 1. CONFIGURATION SERVEUR ---
 const app = express();
 const port = process.env.PORT || 10000;
-
 app.get('/', (req, res) => {
     if (fs.existsSync('error_screenshot.png')) {
-        res.send('<h1>Dernier aperçu du Bot</h1><img src="/debug-image" style="width:100%; max-width:500px;"><p>Si vous voyez un formulaire vide, c\'est que le bot a échoué à le remplir.</p>');
-    } else {
-        res.send('Le serveur est en ligne. Le bot est en train de travailler...');
+        res.send('<h1>Aperçu du Bot</h1><img src="/debug-image" style="width:100%;max-width:500px;">');
+    } else { res.send('Bot actif...'); }
+});
+app.get('/debug-image', (req, res) => { res.sendFile(path.join(process.cwd(), 'error_screenshot.png')); });
+app.listen(port);
+
+// --- 2. FONCTIONS INTERNES (Remplacent tes autres fichiers) ---
+
+async function getFakeMail() {
+    try {
+        const response = await fetch('https://email-fake.com/');
+        const body = await response.text();
+        const $ = cheerio.load(body);
+        let mail = $("#email_ch_text").text();
+        return mail.replace("Adım 1Adım 2Adım 3", "").trim();
+    } catch (e) { return "alan" + Math.floor(Math.random()*1000) + "@emltmp.com"; }
+}
+
+function generateName() {
+    const first = ["Alan", "Azad", "Murat", "Levent", "Cem", "Aras", "Yusuf"];
+    const last = ["Abak", "Yasar", "Kilic", "Demir", "Vinos", "Dag", "Akdeniz"];
+    return _.sample(first) + " " + _.sample(last);
+}
+
+function generateUsername() {
+    return "user_" + Math.random().toString(36).substring(2, 9);
+}
+
+// Fonction pour taper comme un humain
+async function humanType(element, text) {
+    for (let char of text) {
+        await element.sendKeys(char);
+        await new Promise(r => setTimeout(r, Math.random() * 200 + 50));
     }
-});
+}
 
-app.get('/debug-image', (req, res) => {
-    res.sendFile(path.join(process.cwd(), 'error_screenshot.png'));
-});
+// --- 3. LOGIQUE PRINCIPALE ---
 
-app.listen(port, () => {
-    console.log(`Serveur actif sur le port ${port}`);
-});
-
-// --- IMPORTS DES MODULES ---
-const accountInfo = require('./accountInfoGenerator');
-const verifiCode = require('./getCode');
-const email = require('./createFakeMail');
-
-const sleep = (waitTimeInMs) => new Promise(resolve => setTimeout(resolve, waitTimeInMs));
-
-(async function fakeInstagramAccount() {
+(async function main() {
     const chromePath = path.join(process.cwd(), 'chrome-linux64/chrome');
     const driverPath = path.join(process.cwd(), 'chromedriver-linux64/chromedriver');
 
     let service = new chrome.ServiceBuilder(driverPath);
     let options = new chrome.Options();
-    
     options.setChromeBinaryPath(chromePath);
-    options.addArguments('--headless=new'); 
-    options.addArguments('--no-sandbox');
-    options.addArguments('--disable-dev-shm-usage');
-    options.addArguments('--disable-gpu');
-    options.addArguments('--window-size=1920,1080');
+    options.addArguments('--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--window-size=1920,1080');
     options.addArguments('--disable-blink-features=AutomationControlled');
-    options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.94 Safari/537.36');
+    options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-    let browser = await new Builder()
-        .forBrowser('chrome')
-        .setChromeOptions(options)
-        .setChromeService(service)
-        .build();
+    let browser = await new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(service).build();
 
     try {
-        console.log("Navigation vers Instagram...");
+        console.log("Navigation...");
         await browser.get("https://www.instagram.com/accounts/signup/email/");
 
-        // 1. Attente du champ Email (selon ta photo)
-        console.log("Attente du champ email...");
+        // Attente du formulaire
         let emailInput = await browser.wait(until.elementLocated(By.name("emailOrPhone")), 20000);
-        let fakeMail = await email.getFakeMail();
-        console.log("Utilisation de : " + fakeMail);
-        await emailInput.sendKeys(fakeMail);
-        await sleep(1000);
+        let fakeMail = await getFakeMail();
+        console.log("Email : " + fakeMail);
 
-        // 2. Mot de passe
+        // REMPLISSAGE (Ordre de ta photo)
+        await humanType(emailInput, fakeMail);
+        await new Promise(r => setTimeout(r, 1000));
+
         let passwordInput = await browser.findElement(By.name("password"));
-        await passwordInput.sendKeys("me47m47eaa");
-        await sleep(1000);
+        await humanType(passwordInput, "me47m47eaa");
 
-        // 3. Sélection de la Date (XPath flexible pour les menus de ta photo)
-        console.log("Sélection de la date...");
-        await (await browser.findElement(By.xpath("//select[contains(@title, 'Month')] | //select[1]"))).sendKeys("March");
-        await sleep(800);
-        await (await browser.findElement(By.xpath("//select[contains(@title, 'Day')] | //select[2]"))).sendKeys("12");
-        await sleep(800);
-        await (await browser.findElement(By.xpath("//select[contains(@title, 'Year')] | //select[3]"))).sendKeys("1995");
-        await sleep(1500);
+        console.log("Sélection date...");
+        await (await browser.findElement(By.xpath("//select[1]"))).sendKeys("March");
+        await (await browser.findElement(By.xpath("//select[2]"))).sendKeys("12");
+        await (await browser.findElement(By.xpath("//select[3]"))).sendKeys("1995");
+        await new Promise(r => setTimeout(r, 1000));
 
-        // 4. Nom Complet
         let nameInput = await browser.findElement(By.name("fullName"));
-        await nameInput.sendKeys(await accountInfo.generatingName());
-        await sleep(1000);
+        await humanType(nameInput, generateName());
 
-        // 5. Nom d'utilisateur
-        let usernameInput = await browser.findElement(By.name("username"));
-        await usernameInput.sendKeys(await accountInfo.username());
-        await sleep(2000);
+        let userInput = await browser.findElement(By.name("username"));
+        await humanType(userInput, generateUsername());
 
-        // 6. Clic sur le bouton bleu "Submit" (en bas de ta photo)
+        await new Promise(r => setTimeout(r, 2000));
+        
+        // Capture pour vérifier si c'est rempli avant de cliquer
+        let checkImg = await browser.takeScreenshot();
+        fs.writeFileSync('error_screenshot.png', checkImg, 'base64');
+
         let submitBtn = await browser.findElement(By.xpath("//button[@type='submit']"));
         await submitBtn.click();
-        console.log("Formulaire envoyé ! Attente du code...");
+        console.log("Envoyé !");
 
-        // --- PARTIE RÉCUPÉRATION DU CODE ---
-        await sleep(10000);
+        // --- RÉCUPÉRATION DU CODE ---
+        await new Promise(r => setTimeout(r, 15000));
         let fMail = fakeMail.split("@");
-        let veriCode = await verifiCode.getInstCode(fMail[1], fMail[0], browser);
-        console.log("Code reçu : " + veriCode);
+        const codeUrl = 'https://email-fake.com/' + fMail[1] + '/' + fMail[0];
         
+        await browser.executeScript('window.open("' + codeUrl + '");');
+        let tabs = await browser.getAllWindowHandles();
+        await browser.switchTo().window(tabs[1]);
+        await new Promise(r => setTimeout(r, 10000));
+        
+        let codeText = await browser.findElement(By.xpath("//h1[contains(text(), 'Instagram')]")).getText();
+        let cleanCode = codeText.replace(/\D/g, ""); // Garde seulement les chiffres
+        console.log("Code trouvé : " + cleanCode);
+
+        await browser.switchTo().window(tabs[0]);
         let codeField = await browser.wait(until.elementLocated(By.name("email_confirmation_code")), 10000);
-        await codeField.sendKeys(veriCode, Key.RETURN);
+        await codeField.sendKeys(cleanCode, Key.RETURN);
 
     } catch (e) {
-        console.error("ERREUR : " + e.message);
-        // On prend une photo pour comprendre pourquoi ça a bloqué
-        let image = await browser.takeScreenshot();
-        fs.writeFileSync('error_screenshot.png', image, 'base64');
+        console.error("Erreur : " + e.message);
+        let img = await browser.takeScreenshot();
+        fs.writeFileSync('error_screenshot.png', img, 'base64');
     } finally {
-        await sleep(5000);
+        await new Promise(r => setTimeout(r, 10000));
         await browser.quit();
-    } 
+    }
 })();
