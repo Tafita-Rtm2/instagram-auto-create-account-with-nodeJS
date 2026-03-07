@@ -2,7 +2,6 @@ const { Builder, By, until } = require('selenium-webdriver');
 const chrome = require('selenium-webdriver/chrome');
 const path = require('path');
 const express = require('express');
-const http = require('http');
 const fs = require('fs');
 const fetch = require('node-fetch');
 const { generatingName, username } = require('./accountInfoGenerator');
@@ -22,7 +21,9 @@ async function getFakeMail() {
             return data.email;
         }
     } catch(e) { console.log("⚠️ API mail : " + e.message); }
-    return "user" + Math.floor(Math.random()*99999) + "@guerrillamail.com";
+    const fb = "user" + Math.floor(Math.random()*99999) + "@guerrillamail.com";
+    console.log("📧 Fallback : " + fb);
+    return fb;
 }
 
 async function getCodeFromMail() {
@@ -47,13 +48,11 @@ async function getCodeFromMail() {
 
 // ─── ÉTAT GLOBAL ──────────────────────────────────────────────────────────────
 let state = {
-    status: 'starting',   // starting → ready_for_date → waiting_code → done
+    status: 'starting',
     email: '', password: 'Azerty12345!', fullName: '', uName: '', token: '',
-    screenshot: '',       // base64 PNG mis à jour en continu
-    confirmCode: '',
-    codeSubmitted: false
+    screenshot: '',
+    confirmCode: ''
 };
-
 let browserRef = null;
 
 // ─── SERVEUR EXPRESS ──────────────────────────────────────────────────────────
@@ -62,9 +61,9 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 const port = process.env.PORT || 10000;
 
-// Page principale
 app.get('/', (req, res) => {
 
+    // ── Saisie de la date ─────────────────────────────────────────────────────
     if (state.status === 'ready_for_date') {
         res.send(`<!DOCTYPE html><html lang="fr">
 <head>
@@ -72,154 +71,193 @@ app.get('/', (req, res) => {
   <title>Bot Instagram</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:Arial,sans-serif;background:#fafafa;max-width:480px;margin:0 auto;padding:15px}
-    h2{color:#e1306c;text-align:center;margin-bottom:5px;font-size:22px}
-    .sub{text-align:center;color:#666;font-size:13px;margin-bottom:15px}
-    .card{background:#fff;border:1px solid #ddd;border-radius:12px;padding:16px;margin-bottom:12px}
-    .ok{color:#155724;background:#d4edda;border-radius:8px;padding:10px;margin-bottom:8px;font-size:14px;line-height:1.7}
-    .ok b{color:#0a3d1f}
-    .date-title{font-size:16px;font-weight:bold;margin-bottom:12px;color:#333}
-    .date-row{display:flex;gap:10px}
-    .date-row>div{flex:1;text-align:center}
-    .date-row label{display:block;font-size:12px;font-weight:bold;color:#555;margin-bottom:5px}
-    select{width:100%;padding:12px 8px;border:2px solid #ccc;border-radius:10px;font-size:16px;background:#fff;appearance:none;text-align:center}
+    body{font-family:Arial,sans-serif;background:#f0f2f5;min-height:100vh}
+    .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:14px;text-align:center;font-size:17px;font-weight:bold}
+    .container{max-width:460px;margin:0 auto;padding:12px}
+    .card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+    .info-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:14px;border-bottom:1px solid #f0f0f0}
+    .info-row:last-child{border:none}
+    .info-label{color:#888;width:90px;flex-shrink:0}
+    .info-val{color:#222;font-weight:bold;word-break:break-all}
+    .date-title{font-size:15px;font-weight:bold;color:#333;margin-bottom:12px}
+    .date-row{display:flex;gap:8px}
+    .date-col{flex:1;text-align:center}
+    .date-col label{display:block;font-size:11px;font-weight:bold;color:#888;margin-bottom:4px;text-transform:uppercase}
+    select{width:100%;padding:12px 4px;border:2px solid #e0e0e0;border-radius:10px;font-size:16px;background:#fff;text-align:center;cursor:pointer;transition:border-color .2s}
     select:focus{border-color:#e1306c;outline:none}
-    .btn-create{width:100%;padding:16px;background:#0095f6;color:#fff;border:none;border-radius:12px;font-size:18px;font-weight:bold;cursor:pointer;margin-top:5px}
-    .btn-create:active{background:#007acc}
-    .btn-create:disabled{background:#aaa}
-    .status{text-align:center;font-size:14px;color:#666;margin-top:10px;min-height:20px}
-    .preview{width:100%;border-radius:8px;border:1px solid #eee;margin-top:8px}
+    .btn{width:100%;padding:16px;background:linear-gradient(135deg,#0095f6,#0074cc);color:#fff;border:none;border-radius:12px;font-size:18px;font-weight:bold;cursor:pointer;margin-top:4px;transition:opacity .2s}
+    .btn:disabled{opacity:.5}
+    .status{text-align:center;font-size:14px;padding:8px;min-height:22px;border-radius:8px;margin-top:8px}
+    .status.ok{background:#d4edda;color:#155724}
+    .status.err{background:#f8d7da;color:#721c24}
+    .status.wait{background:#fff3cd;color:#856404}
+    .screenshot{width:100%;border-radius:10px;border:1px solid #eee;display:block}
+    .screen-label{font-size:12px;color:#888;text-align:center;margin:6px 0 4px}
   </style>
 </head>
 <body>
-  <h2>🤖 Bot Instagram</h2>
-  <p class="sub">Tout est rempli automatiquement — choisis juste la date !</p>
+  <div class="header">🤖 Bot Instagram — Choisis la date</div>
+  <div class="container">
 
-  <div class="card">
-    <div class="ok">
-      📧 <b>Email :</b> ${state.email}<br>
-      🔒 <b>Mot de passe :</b> ${state.password}<br>
-      🏷️ <b>Nom :</b> ${state.fullName}<br>
-      👤 <b>Username :</b> ${state.uName}
+    <div class="card">
+      <div class="info-row"><span class="info-label">📧 Email</span><span class="info-val">${state.email}</span></div>
+      <div class="info-row"><span class="info-label">🔒 Password</span><span class="info-val">${state.password}</span></div>
+      <div class="info-row"><span class="info-label">🏷️ Nom</span><span class="info-val">${state.fullName}</span></div>
+      <div class="info-row"><span class="info-label">👤 Username</span><span class="info-val">${state.uName}</span></div>
+    </div>
+
+    <div class="card">
+      <div class="date-title">🎂 Date de naissance</div>
+      <div class="date-row">
+        <div class="date-col">
+          <label>Mois</label>
+          <select id="selMonth">
+            <option value="">--</option>
+            <option value="1">Janvier</option><option value="2">Février</option>
+            <option value="3">Mars</option><option value="4">Avril</option>
+            <option value="5">Mai</option><option value="6">Juin</option>
+            <option value="7">Juillet</option><option value="8">Août</option>
+            <option value="9">Septembre</option><option value="10">Octobre</option>
+            <option value="11">Novembre</option><option value="12">Décembre</option>
+          </select>
+        </div>
+        <div class="date-col">
+          <label>Jour</label>
+          <select id="selDay">
+            <option value="">--</option>
+            ${Array.from({length:31},(_,i)=>`<option value="${i+1}">${i+1}</option>`).join('')}
+          </select>
+        </div>
+        <div class="date-col">
+          <label>Année</label>
+          <select id="selYear">
+            <option value="">--</option>
+            ${Array.from({length:80},(_,i)=>`<option value="${2006-i}">${2006-i}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <button class="btn" id="btnCreate" onclick="go()">🚀 Créer le compte !</button>
+      <div class="status wait" id="statusMsg">Choisis le mois, le jour et l'année</div>
+    </div>
+
+    <div class="card">
+      <div class="screen-label">📸 Vue en direct (rafraîchissement auto)</div>
+      <img id="liveImg" class="screenshot" src="/screenshot?t=0" alt="Instagram">
     </div>
   </div>
-
-  <div class="card">
-    <div class="date-title">🎂 Date de naissance</div>
-    <div class="date-row">
-      <div>
-        <label>MOIS</label>
-        <select id="selMonth">
-          <option value="">--</option>
-          <option value="1">Janvier</option><option value="2">Février</option>
-          <option value="3">Mars</option><option value="4">Avril</option>
-          <option value="5">Mai</option><option value="6">Juin</option>
-          <option value="7">Juillet</option><option value="8">Août</option>
-          <option value="9">Septembre</option><option value="10">Octobre</option>
-          <option value="11">Novembre</option><option value="12">Décembre</option>
-        </select>
-      </div>
-      <div>
-        <label>JOUR</label>
-        <select id="selDay">
-          <option value="">--</option>
-          ${Array.from({length:31},(_,i)=>`<option value="${i+1}">${i+1}</option>`).join('')}
-        </select>
-      </div>
-      <div>
-        <label>ANNÉE</label>
-        <select id="selYear">
-          <option value="">--</option>
-          ${Array.from({length:80},(_,i)=>`<option value="${2006-i}">${2006-i}</option>`).join('')}
-        </select>
-      </div>
-    </div>
-  </div>
-
-  <button class="btn-create" id="btnCreate" onclick="createAccount()">🚀 Créer le compte Instagram !</button>
-  <div class="status" id="statusMsg"></div>
-
-  <img id="preview" class="preview" src="/screenshot?t=${Date.now()}" alt="Aperçu Instagram">
 
   <script>
-    // Rafraîchir le screenshot en bas toutes les 3s
+    // Rafraîchir screenshot toutes les 2s
     setInterval(() => {
-      document.getElementById('preview').src = '/screenshot?t=' + Date.now();
-    }, 3000);
+      const img = document.getElementById('liveImg');
+      img.src = '/screenshot?t=' + Date.now();
+    }, 2000);
 
-    async function createAccount() {
-      const month = document.getElementById('selMonth').value;
-      const day   = document.getElementById('selDay').value;
-      const year  = document.getElementById('selYear').value;
-      if (!month || !day || !year) {
-        document.getElementById('statusMsg').textContent = '⚠️ Choisis le mois, le jour ET l\\'année !';
+    async function go() {
+      const m = document.getElementById('selMonth').value;
+      const d = document.getElementById('selDay').value;
+      const y = document.getElementById('selYear').value;
+      const st = document.getElementById('statusMsg');
+      if (!m || !d || !y) {
+        st.className = 'status err';
+        st.textContent = '⚠️ Choisis le mois, le jour ET l\\'année !';
         return;
       }
       document.getElementById('btnCreate').disabled = true;
-      document.getElementById('statusMsg').textContent = '⏳ Injection de la date et soumission...';
+      st.className = 'status wait';
+      st.textContent = '⏳ Injection en cours...';
       try {
         const r = await fetch('/inject-date-and-submit', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({month, day, year})
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({month:m, day:d, year:y})
         });
-        const d = await r.json();
-        document.getElementById('statusMsg').textContent = d.msg || '✅ Fait !';
-        if (d.ok) setTimeout(() => { window.location.href = '/'; }, 2000);
-        else document.getElementById('btnCreate').disabled = false;
+        const data = await r.json();
+        if (data.ok) {
+          st.className = 'status ok';
+          st.textContent = data.msg;
+          setTimeout(() => location.href = '/', 2000);
+        } else {
+          st.className = 'status err';
+          st.textContent = data.msg;
+          document.getElementById('btnCreate').disabled = false;
+        }
       } catch(e) {
-        document.getElementById('statusMsg').textContent = '⚠️ Erreur réseau';
+        st.className = 'status err';
+        st.textContent = '⚠️ Erreur réseau';
         document.getElementById('btnCreate').disabled = false;
       }
     }
   </script>
 </body></html>`);
+
+    // ── Code de confirmation ──────────────────────────────────────────────────
     } else if (state.status === 'waiting_code') {
         res.send(`<!DOCTYPE html><html lang="fr">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Code Instagram</title>
 <style>
-  body{font-family:Arial;max-width:430px;margin:20px auto;padding:15px;background:#fafafa}
-  h2{color:#e1306c;text-align:center}
-  .card{background:#fff;border:1px solid #ddd;border-radius:12px;padding:18px;margin:12px 0}
-  .token{background:#1a1a2e;color:#00ff88;border-radius:8px;padding:10px;font-family:monospace;font-size:10px;word-break:break-all;margin:8px 0}
-  img{width:100%;border-radius:8px;margin-bottom:12px}
-  input{width:90%;padding:16px;font-size:28px;text-align:center;letter-spacing:10px;border:2px solid #ccc;border-radius:10px;display:block;margin:10px auto}
-  button{width:100%;padding:14px;background:#0095f6;color:#fff;border:none;border-radius:10px;font-size:18px;cursor:pointer}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Arial;background:#f0f2f5;min-height:100vh}
+  .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:14px;text-align:center;font-size:17px;font-weight:bold}
+  .container{max-width:460px;margin:0 auto;padding:12px}
+  .card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+  .token{background:#1a1a2e;color:#00ff88;border-radius:8px;padding:10px;font-family:monospace;font-size:10px;word-break:break-all;margin:10px 0}
+  input[type=number]{width:100%;padding:16px;font-size:28px;text-align:center;letter-spacing:10px;border:2px solid #e0e0e0;border-radius:10px;margin:10px 0;-moz-appearance:textfield}
+  input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none}
+  input:focus{border-color:#e1306c;outline:none}
+  .btn{width:100%;padding:14px;background:linear-gradient(135deg,#0095f6,#0074cc);color:#fff;border:none;border-radius:12px;font-size:17px;font-weight:bold;cursor:pointer}
+  .screenshot{width:100%;border-radius:10px;border:1px solid #eee}
+  p{margin:6px 0;font-size:14px;color:#444}
 </style></head>
 <body>
-  <h2>📧 Code de confirmation</h2>
-  <img src="/screenshot?t=${Date.now()}" alt="Instagram">
-  <div class="card">
-    <p>📧 <strong>${state.email}</strong></p>
-    <p>Le bot récupère le code automatiquement...</p>
-    <p>Si tu ne reçois rien dans 1 min, entre-le manuellement :</p>
-    <div class="token">${state.token}</div>
-    <small>curl "https://doux.gleeze.com/tempmail/inbox?token=TOKEN"</small>
+  <div class="header">📧 Code de confirmation</div>
+  <div class="container">
+    <div class="card">
+      <p>📧 Email : <strong>${state.email}</strong></p>
+      <p>Le bot récupère le code automatiquement.<br>Si rien dans 1 min, entre-le ici :</p>
+      <p style="margin-top:10px;font-size:13px;color:#888">🔑 Token pour accéder aux emails :</p>
+      <div class="token">${state.token}</div>
+      <code style="font-size:11px;color:#666;word-break:break-all">curl "https://doux.gleeze.com/tempmail/inbox?token=TOKEN_CI_DESSUS"</code>
+    </div>
+    <div class="card">
+      <form action="/submit-code" method="POST">
+        <input type="number" name="code" placeholder="000000" autofocus>
+        <button class="btn">✅ Valider le code</button>
+      </form>
+    </div>
+    <div class="card">
+      <img class="screenshot" src="/screenshot?t=${Date.now()}" alt="Instagram">
+    </div>
   </div>
-  <form action="/submit-code" method="POST">
-    <input type="number" name="code" placeholder="000000" autofocus>
-    <button>✅ Valider</button>
-  </form>
 </body></html>`);
 
+    // ── Succès ────────────────────────────────────────────────────────────────
     } else if (state.status === 'done') {
-        res.send(`<!DOCTYPE html><html><body style="font-family:Arial;text-align:center;padding:40px;background:#fafafa">
-  <h1 style="color:#28a745">🎉 Compte créé !</h1>
-  <div style="background:#d4edda;border:1px solid #28a745;border-radius:12px;padding:25px;max-width:400px;margin:auto;text-align:left">
-    <p>📧 <b>Email :</b> ${state.email}</p>
-    <p>🔒 <b>Mot de passe :</b> ${state.password}</p>
-    <p>👤 <b>Username :</b> @${state.uName}</p>
-    <p>🏷️ <b>Nom :</b> ${state.fullName}</p>
+        res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+<body style="font-family:Arial;background:#f0f2f5;min-height:100vh">
+  <div style="background:linear-gradient(135deg,#28a745,#20c997);color:#fff;padding:20px;text-align:center;font-size:20px;font-weight:bold">
+    🎉 Compte Instagram créé !
   </div>
-  <p style="color:#666;margin-top:15px">Sauvegarde ces informations !</p>
+  <div style="max-width:460px;margin:20px auto;padding:0 12px">
+    <div style="background:#fff;border-radius:14px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.08)">
+      <p style="margin:8px 0;font-size:16px">📧 <b>Email :</b> <span style="color:#0095f6">${state.email}</span></p>
+      <p style="margin:8px 0;font-size:16px">🔒 <b>Mot de passe :</b> ${state.password}</p>
+      <p style="margin:8px 0;font-size:16px">👤 <b>Username :</b> @${state.uName}</p>
+      <p style="margin:8px 0;font-size:16px">🏷️ <b>Nom :</b> ${state.fullName}</p>
+    </div>
+    <p style="text-align:center;color:#666;margin-top:15px;font-size:14px">💾 Sauvegarde ces informations !</p>
+  </div>
 </body></html>`);
 
+    // ── Erreur ────────────────────────────────────────────────────────────────
     } else if (state.status === 'error') {
-        res.send(`<body style="font-family:Arial;padding:30px"><h1 style="color:red">❌ ${state.errorMsg}</h1><img src="/screenshot" style="width:100%"></body>`);
+        res.send(`<body style="font-family:Arial;padding:20px"><h2 style="color:red">❌ ${state.errorMsg}</h2><img src="/screenshot" style="width:100%;border-radius:8px"></body>`);
+
+    // ── Chargement ────────────────────────────────────────────────────────────
     } else {
-        res.send(`<body style="font-family:Arial;text-align:center;padding:60px;background:#fafafa">
-  <h2>⏳ ${state.status}...</h2>
+        res.send(`<body style="font-family:Arial;text-align:center;padding:60px;background:#f0f2f5">
+  <h2 style="color:#0095f6">⏳ ${state.status}...</h2>
+  <p style="color:#666;margin-top:10px">Le bot initialise le formulaire Instagram</p>
   <meta http-equiv="refresh" content="2">
 </body>`);
     }
@@ -228,169 +266,119 @@ app.get('/', (req, res) => {
 // Screenshot live
 app.get('/screenshot', (req, res) => {
     if (state.screenshot) {
-        const buf = Buffer.from(state.screenshot, 'base64');
-        res.set('Content-Type', 'image/png');
-        res.set('Cache-Control', 'no-cache');
-        res.send(buf);
-    } else {
-        res.status(404).send('Pas de screenshot');
-    }
+        res.set('Content-Type','image/png');
+        res.set('Cache-Control','no-cache,no-store');
+        res.send(Buffer.from(state.screenshot, 'base64'));
+    } else { res.status(404).send(''); }
 });
 
-// ✅ Recevoir un clic et l'exécuter dans le navigateur
-// ✅ Injection date depuis nos propres selects + submit
+// ✅ Injection date + submit (avec scroll pour trouver le bouton)
 app.post('/inject-date-and-submit', async (req, res) => {
     const { month, day, year } = req.body;
     console.log(`📅 Injection date : ${day}/${month}/${year}`);
     try {
-        if (!browserRef) return res.json({ ok: false, msg: '❌ Browser non disponible' });
+        if (!browserRef) return res.json({ ok:false, msg:'❌ Browser non dispo' });
 
-        // Trouver les selects Instagram
-        let selects = await browserRef.findElements(By.tagName("select"));
-        console.log(`   ${selects.length} select(s) trouvé(s)`);
+        // Scroll en haut pour voir tout le formulaire
+        await browserRef.executeScript("window.scrollTo(0,0);");
+        await sleep(500);
 
-        if (selects.length >= 3) {
-            // Détecter l'ordre Month/Day/Year
-            let opt1 = await browserRef.executeScript(`return arguments[0].options.length>1?arguments[0].options[1].text.trim():'';`, selects[0]);
-            let mFirst = /january|february|march|janvier|février|mars/i.test(opt1);
-            let [dI,mI,yI] = mFirst ? [1,0,2] : [0,1,2];
-
-            const injectSelect = async (sel, val) => {
-                return await browserRef.executeScript(`
-                    var s=arguments[0],v=String(arguments[1]);
-                    for(var i=0;i<s.options.length;i++){
-                        if(s.options[i].value===v||s.options[i].text.trim()===v){
-                            s.selectedIndex=i;
-                            Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype,'value').set.call(s,s.options[i].value);
-                            ['input','change','blur'].forEach(n=>s.dispatchEvent(new Event(n,{bubbles:true})));
-                            return s.options[i].text;
-                        }
-                    }return null;
-                `, sel, String(val));
-            };
-
-            let r1 = await injectSelect(selects[dI], day);   await sleep(500);
-            let r2 = await injectSelect(selects[mI], month); await sleep(500);
-            let r3 = await injectSelect(selects[yI], year);  await sleep(500);
-            console.log(`   Résultat : jour="${r1}" mois="${r2}" année="${r3}"`);
-
-            if (!r1 || !r2 || !r3) {
-                return res.json({ ok: false, msg: `❌ Injection échouée (jour=${r1} mois=${r2} année=${r3})` });
-            }
-        } else if (selects.length > 0) {
-            // Essayer via JavaScript direct sur tous les selects visibles
-            await browserRef.executeScript(`
-                var sels = document.querySelectorAll('select');
-                var vals = [arguments[0], arguments[1], arguments[2]];
-                // Essayer month=0, day=1, year=2
-                for(var si=0; si<Math.min(sels.length,3); si++){
-                    var s = sels[si], v = String(vals[si]);
-                    for(var i=0;i<s.options.length;i++){
-                        if(s.options[i].value===v||s.options[i].text.trim()===v){
-                            s.selectedIndex=i;
-                            Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype,'value').set.call(s,s.options[i].value);
-                            ['input','change','blur'].forEach(n=>s.dispatchEvent(new Event(n,{bubbles:true})));
+        // Attendre que les 3 selects soient présents (max 10 tentatives)
+        let selects = [];
+        for (let i = 0; i < 10; i++) {
+            selects = await browserRef.findElements(By.tagName("select"));
+            console.log(`   Tentative ${i+1} : ${selects.length} select(s)`);
+            if (selects.length >= 3) break;
+            // Essayer de déclencher le blur sur le password pour faire apparaître les selects
+            if (i < 3) {
+                await browserRef.executeScript(`
+                    var inputs = document.querySelectorAll('input');
+                    for(var i=0;i<inputs.length;i++){
+                        if(inputs[i].type==='password'){
+                            inputs[i].focus();
+                            setTimeout(function(){ inputs[i].blur(); document.body.click(); }, 100);
                             break;
                         }
                     }
-                }
-            `, month, day, year);
-            await sleep(500);
-            console.log(`   Injection JS directe tentée`);
-        } else {
-            return res.json({ ok: false, msg: '❌ Aucun select de date trouvé sur la page' });
+                `);
+            }
+            await sleep(1500);
         }
 
-        await sleep(1000);
+        if (selects.length < 3) {
+            return res.json({ ok:false, msg:`❌ Seulement ${selects.length} select(s) trouvé(s). Le formulaire n'est pas prêt.` });
+        }
+
+        // Injecter les valeurs dans les selects
+        const injectSel = async (sel, val) => {
+            return await browserRef.executeScript(`
+                var s=arguments[0], v=String(arguments[1]);
+                for(var i=0;i<s.options.length;i++){
+                    if(s.options[i].value===v || s.options[i].text.trim()===v){
+                        s.selectedIndex=i;
+                        Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype,'value').set.call(s,s.options[i].value);
+                        ['input','change','blur'].forEach(function(n){ s.dispatchEvent(new Event(n,{bubbles:true})); });
+                        return s.options[i].text;
+                    }
+                }
+                return null;
+            `, sel, String(val));
+        };
+
+        // Détecter l'ordre Month/Day/Year
+        let opt1 = await browserRef.executeScript(`return arguments[0].options.length>1?arguments[0].options[1].text.trim():'';`, selects[0]);
+        let mFirst = /january|february|march|janvier|février|mars/i.test(opt1);
+        let [dI, mI, yI] = mFirst ? [1,0,2] : [0,1,2];
+
+        let r1 = await injectSel(selects[mI], month); await sleep(400);
+        let r2 = await injectSel(selects[dI], day);   await sleep(400);
+        let r3 = await injectSel(selects[yI], year);  await sleep(600);
+        console.log(`   ✅ Mois="${r1}" Jour="${r2}" Année="${r3}"`);
+
+        if (!r1 || !r2 || !r3) {
+            return res.json({ ok:false, msg:`❌ Injection partielle (mois=${r1} jour=${r2} année=${r3})` });
+        }
+
         state.screenshot = await browserRef.takeScreenshot();
 
-        // Cliquer Submit
+        // Trouver le bouton Submit — scroller si nécessaire
+        await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
+        await sleep(800);
+
         let btns = await browserRef.findElements(By.tagName("button"));
         let submitBtn = null;
         for (let b of btns) {
             let t   = await b.getAttribute("type");
-            let txt = (await b.getText()).toLowerCase();
-            if (t === "submit" || /submit|envoyer|next|sign up/i.test(txt)) { submitBtn = b; break; }
+            let txt = (await b.getText()).toLowerCase().replace(/\s+/g,' ').trim();
+            console.log(`   btn type="${t}" txt="${txt}"`);
+            if (t === "submit" || /^(submit|next|sign up|envoyer)$/.test(txt)) { submitBtn = b; break; }
         }
-        if (!submitBtn && btns.length > 0) submitBtn = btns[btns.length - 1];
+        // Fallback : prendre le dernier bouton
+        if (!submitBtn && btns.length > 0) {
+            submitBtn = btns[btns.length - 1];
+            console.log("   Fallback : dernier bouton");
+        }
 
         if (submitBtn) {
-            await browserRef.executeScript("arguments[0].removeAttribute('disabled');arguments[0].click();", submitBtn);
+            await browserRef.executeScript(`
+                arguments[0].removeAttribute('disabled');
+                arguments[0].scrollIntoView({block:'center'});
+            `, submitBtn);
+            await sleep(500);
+            await browserRef.executeScript("arguments[0].click();", submitBtn);
             await sleep(3000);
             state.screenshot = await browserRef.takeScreenshot();
             state.status = 'waiting_code';
             console.log("✅ Submit cliqué !");
-            res.json({ ok: true, msg: '✅ Date injectée et Submit cliqué !' });
+            res.json({ ok:true, msg:'✅ Date injectée et Submit cliqué !' });
         } else {
-            res.json({ ok: false, msg: '❌ Bouton Submit non trouvé' });
+            res.json({ ok:false, msg:'❌ Bouton Submit introuvable' });
         }
+
     } catch(e) {
-        console.error("❌ inject-date-and-submit : " + e.message);
-        res.json({ ok: false, msg: '❌ ' + e.message });
+        console.error("❌ inject : " + e.message);
+        res.json({ ok:false, msg:'❌ ' + e.message });
     }
-});
-
-app.post('/click', async (req, res) => {
-    const { x, y } = req.body;
-    try {
-        if (browserRef) {
-            await browserRef.executeScript(`
-                var el = document.elementFromPoint(arguments[0], arguments[1]);
-                if (el) {
-                    el.click();
-                    // Pour les selects, simuler un vrai clic
-                    var evt = new MouseEvent('click', {bubbles:true, cancelable:true, clientX:arguments[0], clientY:arguments[1]});
-                    el.dispatchEvent(evt);
-                }
-            `, x, y);
-            await sleep(800);
-            // Mettre à jour le screenshot après le clic
-            state.screenshot = await browserRef.takeScreenshot();
-        }
-        res.json({ ok: true });
-    } catch(e) {
-        res.json({ ok: false, error: e.message });
-    }
-});
-
-// Scroll
-app.post('/scroll', async (req, res) => {
-    const { dy } = req.body;
-    try {
-        if (browserRef) {
-            await browserRef.executeScript(`window.scrollBy(0, arguments[0]);`, dy);
-            await sleep(500);
-            state.screenshot = await browserRef.takeScreenshot();
-        }
-        res.json({ ok: true });
-    } catch(e) { res.json({ ok: false }); }
-});
-
-// ✅ Déclencher le Submit depuis l'interface
-app.post('/do-submit', async (req, res) => {
-    try {
-        if (browserRef) {
-            let btns = await browserRef.findElements(By.tagName("button"));
-            let submitBtn = null;
-            for (let b of btns) {
-                let t   = await b.getAttribute("type");
-                let txt = (await b.getText()).toLowerCase();
-                if (t === "submit" || /submit|envoyer|next|sign up/i.test(txt)) { submitBtn = b; break; }
-            }
-            if (!submitBtn && btns.length > 0) submitBtn = btns[btns.length - 1];
-
-            if (submitBtn) {
-                await browserRef.executeScript("arguments[0].removeAttribute('disabled');arguments[0].click();", submitBtn);
-                await sleep(3000);
-                state.screenshot = await browserRef.takeScreenshot();
-                // Passer à la phase code
-                state.status = 'waiting_code';
-                res.json({ ok: true, msg: '✅ Submit cliqué ! En attente du code...' });
-            } else {
-                res.json({ ok: false, msg: '❌ Aucun bouton submit trouvé' });
-            }
-        }
-    } catch(e) { res.json({ ok: false, msg: '❌ ' + e.message }); }
 });
 
 // Code manuel
@@ -400,21 +388,26 @@ app.post('/submit-code', (req, res) => {
     res.send(`<body style="font-family:Arial;text-align:center;padding:40px"><h2 style="color:green">✅ Code reçu !</h2><meta http-equiv="refresh" content="2;url=/"></body>`);
 });
 
+app.get('/debug-image', (req, res) => {
+    if (fs.existsSync('error_screenshot.png')) res.sendFile(path.join(process.cwd(), 'error_screenshot.png'));
+    else res.send('Pas de screenshot');
+});
+
 app.listen(port, '0.0.0.0', () => console.log(`🌐 Port ${port}`));
 
 // ─── UTILITAIRES ──────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 async function humanType(el, text) {
-    for (let c of text) { await el.sendKeys(c); await sleep(Math.random()*45+20); }
+    for (let c of text) { await el.sendKeys(c); await sleep(Math.random()*30+15); }
 }
 async function fillReact(browser, el, val) {
     await browser.executeScript(`
         var e=arguments[0],v=arguments[1];
         Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(e,v);
-        ['input','change','blur'].forEach(n=>e.dispatchEvent(new Event(n,{bubbles:true})));
+        ['input','change','blur'].forEach(function(n){ e.dispatchEvent(new Event(n,{bubbles:true})); });
     `, el, val);
-    await sleep(300);
+    await sleep(200);
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -432,10 +425,11 @@ async function fillReact(browser, el, val) {
     let browser = await new Builder().forBrowser('chrome').setChromeOptions(opts).setChromeService(service).build();
     browserRef = browser;
 
-    // Screenshot en continu
+    // Screenshot en continu toutes les 2s
     const liveLoop = setInterval(async () => {
-        try { state.screenshot = await browser.takeScreenshot(); } catch(e) { clearInterval(liveLoop); }
-    }, 1500);
+        try { state.screenshot = await browser.takeScreenshot(); }
+        catch(e) { clearInterval(liveLoop); }
+    }, 2000);
 
     try {
         // ── 1. SETUP ──────────────────────────────────────────────────────────
@@ -445,17 +439,17 @@ async function fillReact(browser, el, val) {
         state.fullName = generatingName();
         state.uName    = username();
         state.status   = 'loading';
-
         console.log(`👤 Nom: "${state.fullName}" | Username: "${state.uName}"`);
 
         // ── 2. OUVRIR INSTAGRAM ───────────────────────────────────────────────
         console.log("🌍 Ouverture Instagram...");
         await browser.get("https://www.instagram.com/accounts/emailsignup/");
-        await sleep(8000);
+        await sleep(6000);
 
+        // Cookie popup
         try {
             let btn = await browser.findElement(By.xpath("//button[contains(.,'Allow') or contains(.,'Accept') or contains(.,'Accepter') or contains(.,'Tout autoriser')]"));
-            await btn.click(); await sleep(2000);
+            await btn.click(); await sleep(1500);
         } catch(e) {}
 
         // ── 3. EMAIL ──────────────────────────────────────────────────────────
@@ -465,31 +459,51 @@ async function fillReact(browser, el, val) {
             let t = await inp.getAttribute("type");
             if (t === "text" || t === "email" || t === "tel") {
                 await browser.executeScript("arguments[0].click();arguments[0].focus();", inp);
-                await sleep(400);
+                await sleep(300);
                 await humanType(inp, mail);
                 await fillReact(browser, inp, mail);
-                console.log("✅ Email saisi");
+                console.log("✅ Email : " + mail);
                 break;
             }
         }
+        await sleep(500);
 
         // ── 4. PASSWORD ───────────────────────────────────────────────────────
         console.log("🔒 Password...");
+        inputs = await browser.findElements(By.tagName("input"));
         for (let inp of inputs) {
             let t = await inp.getAttribute("type");
             if (t === "password") {
                 await browser.executeScript("arguments[0].click();arguments[0].focus();", inp);
-                await sleep(300);
+                await sleep(200);
                 await humanType(inp, state.password);
                 await fillReact(browser, inp, state.password);
-                await browser.executeScript("arguments[0].blur();document.body.click();", inp);
-                await sleep(2500);
+                // Blur fort pour déclencher l'apparition des selects
+                await browser.executeScript(`
+                    arguments[0].blur();
+                    document.body.click();
+                    document.body.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+                `, inp);
+                await sleep(3000); // Attendre que les selects apparaissent
                 console.log("✅ Password saisi");
                 break;
             }
         }
 
-        // ── 5. NOM & USERNAME ─────────────────────────────────────────────────
+        // ── 5. VÉRIFIER QUE LES SELECTS SONT LÀ ──────────────────────────────
+        let selects = await browser.findElements(By.tagName("select"));
+        console.log(`   ${selects.length} select(s) après password blur`);
+        if (selects.length < 3) {
+            // Attendre encore
+            for (let i = 0; i < 5; i++) {
+                await sleep(2000);
+                selects = await browser.findElements(By.tagName("select"));
+                console.log(`   Attente selects ${i+1}/5 : ${selects.length}`);
+                if (selects.length >= 3) break;
+            }
+        }
+
+        // ── 6. NOM & USERNAME ─────────────────────────────────────────────────
         console.log("👤 Nom & Username...");
         let allInputs = await browser.findElements(By.tagName("input"));
         let textInputs = [];
@@ -502,53 +516,51 @@ async function fillReact(browser, el, val) {
         if (textInputs.length >= 2) {
             let nameInp = textInputs[textInputs.length - 2];
             await browser.executeScript("arguments[0].click();arguments[0].focus();", nameInp);
-            await sleep(300);
+            await sleep(200);
             await humanType(nameInp, state.fullName);
             await fillReact(browser, nameInp, state.fullName);
             console.log("✅ Nom : " + state.fullName);
-            await sleep(500);
+            await sleep(400);
         }
 
         if (textInputs.length >= 1) {
             let userInp = textInputs[textInputs.length - 1];
             await browser.executeScript("arguments[0].click();arguments[0].focus();", userInp);
-            await sleep(300);
-            await browser.executeScript(`var e=arguments[0];Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(e,'');e.dispatchEvent(new Event('input',{bubbles:true}));`, userInp);
             await sleep(200);
+            await browser.executeScript(`
+                var e=arguments[0];
+                Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(e,'');
+                e.dispatchEvent(new Event('input',{bubbles:true}));
+            `, userInp);
+            await sleep(150);
             await humanType(userInp, state.uName);
             await fillReact(browser, userInp, state.uName);
             console.log("✅ Username : " + state.uName);
-            await sleep(1500);
+            await sleep(1000);
         }
 
-        // ── 6. PASSER EN MODE INTERACTIF pour la date ─────────────────────────
-        console.log("🎂 En attente de la saisie de la date par l'utilisateur...");
-        console.log("🌐 L'utilisateur doit ouvrir l'URL Render et cliquer sur les menus de date");
+        // ── 7. ATTENTE SAISIE DATE PAR L'UTILISATEUR ──────────────────────────
+        console.log("🎂 En attente de la date (interface web)...");
         state.status = 'ready_for_date';
 
-        // Attendre que l'utilisateur clique Submit (via /do-submit)
-        // Le status passera à 'waiting_code' quand Submit est cliqué
         let waited = 0;
         while (state.status === 'ready_for_date' && waited < 600) {
             await sleep(2000); waited += 2;
         }
 
         if (state.status !== 'waiting_code') {
-            state.status = 'error'; state.errorMsg = 'Timeout : Submit non cliqué';
-            clearInterval(liveLoop);
-            return;
+            state.status = 'error'; state.errorMsg = 'Timeout : pas de réponse';
+            clearInterval(liveLoop); return;
         }
 
-        // ── 7. CODE DE VÉRIFICATION ───────────────────────────────────────────
+        // ── 8. CODE DE VÉRIFICATION ───────────────────────────────────────────
         console.log("📬 Attente code...");
         let code = await getCodeFromMail();
 
         if (!code) {
-            console.log("   ⏳ Attente code manuel...");
-            let waitedCode = 0;
-            while (!state.confirmCode && waitedCode < 300) {
-                await sleep(2000); waitedCode += 2;
-            }
+            console.log("   ⏳ Attente code manuel (5 min)...");
+            let w = 0;
+            while (!state.confirmCode && w < 300) { await sleep(2000); w += 2; }
             code = state.confirmCode;
         }
 
@@ -567,7 +579,7 @@ async function fillReact(browser, el, val) {
                 await browser.executeScript("arguments[0].focus();", codeInput);
                 await humanType(codeInput, code);
                 await fillReact(browser, codeInput, code);
-                await sleep(1000);
+                await sleep(800);
                 let cBtns = await browser.findElements(By.tagName("button"));
                 if (cBtns.length > 0) {
                     await browser.executeScript("arguments[0].click();", cBtns[0]);
@@ -578,7 +590,7 @@ async function fillReact(browser, el, val) {
 
         await sleep(5000);
         clearInterval(liveLoop);
-        state.screenshot = await browser.takeScreenshot();
+        try { state.screenshot = await browser.takeScreenshot(); } catch(e) {}
         state.status = 'done';
 
         console.log("════════════════════════════════════════");
