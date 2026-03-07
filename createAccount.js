@@ -264,7 +264,7 @@ app.get('/', (req, res) => {
   </script>
 </body></html>`);
 
-    // ── Code de confirmation ──────────────────────────────────────────────────
+    // ── Page captcha ─────────────────────────────────────────────────────────
     } else if (state.status === 'waiting_captcha') {
         res.send(`<!DOCTYPE html><html lang="fr">
 <head>
@@ -272,78 +272,106 @@ app.get('/', (req, res) => {
   <title>Captcha</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:Arial;background:#111;color:#fff}
-    .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:12px;text-align:center;font-size:16px;font-weight:bold}
-    .info{text-align:center;padding:8px 12px;font-size:13px;color:#ccc;background:#222}
-    .wrap{position:relative;width:100%;max-width:540px;margin:0 auto;touch-action:none}
-    #liveImg{width:100%;display:block;cursor:crosshair}
-    #clickFlash{position:absolute;width:28px;height:28px;border-radius:50%;background:rgba(255,80,80,0.7);border:3px solid #fff;pointer-events:none;display:none;transform:translate(-50%,-50%)}
-    .btns{display:flex;gap:8px;padding:8px;background:#222;max-width:540px;margin:0 auto}
-    .btn{flex:1;padding:12px 4px;border:none;border-radius:10px;font-size:13px;font-weight:bold;cursor:pointer;color:#fff}
+    html,body{height:100%;background:#111;color:#fff;font-family:Arial}
+    .header{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:10px;text-align:center;font-size:15px;font-weight:bold}
+    #msg{text-align:center;padding:6px 10px;font-size:13px;color:#ffcc00;background:#1a1a1a;min-height:28px}
+    .wrap{position:relative;width:100%;overflow:hidden;background:#000;touch-action:none;cursor:crosshair}
+    /* On affiche l'image en mode "zoom sur le captcha" — centré verticalement */
+    #liveImg{width:100%;display:block;object-fit:cover;object-position:center 38%}
+    #clickFlash{position:absolute;width:32px;height:32px;border-radius:50%;background:rgba(255,80,80,0.75);border:3px solid #fff;box-shadow:0 0 8px #f00;pointer-events:none;display:none;transform:translate(-50%,-50%);transition:opacity .4s}
+    .btns{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;padding:8px;background:#222}
+    .btn{padding:11px 4px;border:none;border-radius:10px;font-size:12px;font-weight:bold;cursor:pointer;color:#fff;line-height:1.3}
+    .btn-skip{background:linear-gradient(135deg,#6c757d,#495057)}
     .btn-next{background:linear-gradient(135deg,#fd7e14,#e55a00)}
     .btn-ok{background:linear-gradient(135deg,#28a745,#1a7a30)}
-    #msg{text-align:center;padding:6px;font-size:13px;color:#ffcc00;min-height:20px;background:#1a1a1a}
+    .tip{text-align:center;padding:6px;font-size:11px;color:#888;background:#111}
   </style>
 </head>
 <body>
-  <div class="header">🤖 Captcha — Clique directement sur l'écran !</div>
-  <div class="info">👆 Touche l'écran pour cliquer dans le navigateur • Se rafraîchit auto</div>
-  <div id="msg">Clique la checkbox "I'm not a robot" dans l'image</div>
+  <div class="header">🤖 Captcha — Clique sur les cases !</div>
+  <div id="msg">👆 Clique sur chaque case demandée, puis ▶️ Next</div>
   <div class="wrap" id="wrap">
     <img id="liveImg" src="/screenshot?t=0" alt="Instagram">
     <div id="clickFlash"></div>
   </div>
   <div class="btns">
-    <button class="btn btn-next" onclick="clickNext()">▶️ Cliquer Next</button>
-    <button class="btn btn-ok" onclick="done()">✅ Compte créé !</button>
+    <button class="btn btn-skip" onclick="clickSkip()">⏭️ SKIP</button>
+    <button class="btn btn-next" onclick="clickNext()">▶️ Next</button>
+    <button class="btn btn-ok" onclick="done()">✅ Créé !</button>
   </div>
+  <div class="tip">🔄 Se rafraîchit automatiquement • Clic = transmis au navigateur</div>
   <script>
     const BROWSER_W = 1280, BROWSER_H = 900;
     const msg = document.getElementById('msg');
     const flash = document.getElementById('clickFlash');
+    const img = document.getElementById('liveImg');
+    const wrap = document.getElementById('wrap');
+
+    // Adapter la hauteur du wrap pour montrer la zone captcha
+    function fitWrap() {
+      const vw = window.innerWidth;
+      // Le captcha est approximativement dans la moitié centrale de l'écran 1280x900
+      // On affiche l'image à 100% largeur, donc height = 900/1280 * vw
+      const imgH = (900 / 1280) * vw;
+      wrap.style.height = Math.min(imgH, window.innerHeight - 160) + 'px';
+    }
+    fitWrap();
+    window.addEventListener('resize', fitWrap);
+
     let refreshing = true;
     const refreshLoop = setInterval(() => {
       if (!refreshing) return;
-      document.getElementById('liveImg').src = '/screenshot?t=' + Date.now();
-    }, 1500);
+      img.src = '/screenshot?t=' + Date.now();
+    }, 1800);
 
-    document.getElementById('liveImg').addEventListener('click', async function(e) {
-      // Calculer les coordonnées dans le navigateur headless
-      const rect = this.getBoundingClientRect();
+    // Clic sur l'image → transmis au navigateur headless
+    wrap.addEventListener('click', async function(e) {
+      const rect = img.getBoundingClientRect();
+      // Calculer les coordonnées réelles dans le navigateur (1280x900)
       const scaleX = BROWSER_W / rect.width;
-      const scaleY = BROWSER_H / rect.height;
+      // L'image peut être croppée verticalement via object-fit, recalculer Y
+      const displayedImgH = rect.width * (BROWSER_H / BROWSER_W);
+      const offsetY = (rect.height - displayedImgH) / 2; // offset crop vertical
+      const rawY = e.clientY - rect.top;
       const bx = Math.round((e.clientX - rect.left) * scaleX);
-      const by = Math.round((e.clientY - rect.top)  * scaleY);
+      const by = Math.round((rawY - offsetY) * scaleX);
 
-      // Afficher le flash rouge à l'endroit du clic
+      // Flash rouge
       flash.style.left = (e.clientX - rect.left) + 'px';
       flash.style.top  = (e.clientY - rect.top)  + 'px';
       flash.style.display = 'block';
-      setTimeout(() => { flash.style.display = 'none'; }, 600);
+      setTimeout(() => { flash.style.display = 'none'; }, 700);
 
-      msg.textContent = '⏳ Clic envoyé (' + bx + ',' + by + ')...';
+      msg.textContent = '⏳ Clic (' + bx + ',' + by + ')...';
       refreshing = false;
 
       try {
         const r = await fetch('/remote-click', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({x: bx, y: by})
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({x:bx, y:by})
         });
         const d = await r.json();
-        msg.textContent = d.msg || '✅ Clic transmis !';
-      } catch(e) {
-        msg.textContent = '❌ Erreur réseau';
-      }
-      setTimeout(() => { refreshing = true; }, 1200);
+        msg.textContent = d.msg || '✅ Clic transmis';
+        if (d.status === 'waiting_code') { setTimeout(() => location.href='/', 1500); return; }
+      } catch(e) { msg.textContent = '❌ Erreur réseau'; }
+      setTimeout(() => { refreshing = true; }, 1500);
     });
 
+    async function clickSkip() {
+      msg.textContent = '⏳ SKIP...';
+      // Clic sur le bouton SKIP du reCAPTCHA (coords approximatives)
+      await fetch('/remote-click', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({x:690, y:645})});
+      setTimeout(() => { refreshing = true; }, 1500);
+      msg.textContent = '✅ SKIP cliqué — attends...';
+    }
     async function clickNext() {
-      msg.textContent = '⏳ Clic Next...';
+      msg.textContent = '⏳ Next...';
+      refreshing = false;
       const r = await fetch('/captcha-next', {method:'POST'});
       const d = await r.json();
       msg.textContent = d.msg || '✅';
-      if (d.status === 'waiting_code') setTimeout(() => location.href = '/', 1500);
+      if (d.status === 'waiting_code') setTimeout(() => location.href='/', 1500);
+      else setTimeout(() => { refreshing = true; }, 1500);
     }
     async function done() {
       await fetch('/captcha-done', {method:'POST'});
