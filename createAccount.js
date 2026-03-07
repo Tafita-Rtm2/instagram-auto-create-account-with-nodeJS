@@ -290,12 +290,30 @@ app.get('/', (req, res) => {
     </div>
     <div class="card">
       <img id="liveImg" class="screenshot" src="/screenshot?t=0">
-      <button class="btn" onclick="done()">✅ J'ai coché le captcha — Continuer</button>
+      <div id="statusMsg" style="text-align:center;padding:8px;font-size:14px;color:#666;min-height:20px;margin:6px 0"></div>
+      <button class="btn" style="background:linear-gradient(135deg,#6f42c1,#563d7c)" onclick="clickCb()">🖱️ 1. Cliquer la checkbox reCAPTCHA</button>
+      <button class="btn" style="background:linear-gradient(135deg,#fd7e14,#e55a00);margin-top:8px" onclick="clickNext()">▶️ 2. Cliquer "Next" du captcha</button>
+      <button class="btn" style="margin-top:8px" onclick="done()">✅ 3. Captcha résolu — Continuer</button>
     </div>
   </div>
   <script>
     setInterval(() => { document.getElementById('liveImg').src = '/screenshot?t=' + Date.now(); }, 2000);
+    const st = document.getElementById('statusMsg');
+    async function clickCb() {
+      st.textContent = '⏳ Clic checkbox...';
+      const r = await fetch('/captcha-click', {method:'POST'});
+      const d = await r.json();
+      st.textContent = d.msg || (d.ok ? '✅ Checkbox cliquée !' : '❌ Echec');
+    }
+    async function clickNext() {
+      st.textContent = '⏳ Clic Next...';
+      const r = await fetch('/captcha-next', {method:'POST'});
+      const d = await r.json();
+      st.textContent = d.msg || (d.ok ? '✅ Next cliqué !' : '❌ Echec');
+      if (d.msg && d.msg.includes('créé')) setTimeout(() => location.href = '/', 2000);
+    }
     async function done() {
+      st.textContent = '⏳ Finalisation...';
       await fetch('/captcha-done', {method:'POST'});
       location.href = '/';
     }
@@ -742,6 +760,71 @@ app.post('/do-submit', async (req, res) => {
 
     } catch(e) {
         console.error("❌ do-submit : " + e.message);
+        res.json({ ok:false, msg:'❌ ' + e.message });
+    }
+});
+
+// Route captcha-click — clic checkbox reCAPTCHA dans l'iframe
+app.post('/captcha-click', async (req, res) => {
+    try {
+        if (!browserRef) return res.json({ ok:false, msg:'Browser non dispo' });
+        const iframes = await browserRef.findElements(By.tagName('iframe'));
+        console.log(`   ${iframes.length} iframe(s)`);
+        let checked = false;
+        for (let iframe of iframes) {
+            const src = (await iframe.getAttribute('src') || '');
+            if (src.includes('recaptcha') || src.includes('captcha') || src.includes('anchor')) {
+                await browserRef.switchTo().frame(iframe);
+                await sleep(300);
+                try {
+                    const cb = await browserRef.findElement(By.css('.recaptcha-checkbox-border, #recaptcha-anchor, [role="checkbox"], .rc-anchor-checkbox-label'));
+                    await cb.click();
+                    checked = true;
+                    console.log("   ✅ Checkbox cliquée via iframe!");
+                } catch(e) { console.log("   Checkbox err: " + e.message); }
+                await browserRef.switchTo().defaultContent();
+                break;
+            }
+        }
+        await sleep(2000);
+        state.screenshot = await browserRef.takeScreenshot();
+        res.json({ ok:true, checked, msg: checked ? '✅ Checkbox cliquée ! Attends 2s puis clique Next' : '⚠️ Iframe reCAPTCHA non trouvé' });
+    } catch(e) {
+        try { await browserRef.switchTo().defaultContent(); } catch(_) {}
+        res.json({ ok:false, msg:'❌ ' + e.message });
+    }
+});
+
+// Route captcha-next — clic bouton Next du dialog captcha
+app.post('/captcha-next', async (req, res) => {
+    try {
+        if (!browserRef) return res.json({ ok:false, msg:'Browser non dispo' });
+        // Chercher le bouton Next dans le dialog (role=button, txt=Next)
+        const nextCoords = await browserRef.executeScript(`
+            var btns = Array.from(document.querySelectorAll('[role="button"],button'));
+            for (var b of btns) {
+                if (b.textContent.trim() === 'Next') {
+                    var r = b.getBoundingClientRect();
+                    return {x: Math.round(r.left+r.width/2), y: Math.round(r.top+r.height/2)};
+                }
+            }
+            return null;
+        `);
+        console.log("   Next coords : " + JSON.stringify(nextCoords));
+        if (nextCoords) {
+            await browserRef.actions().move({x: nextCoords.x, y: nextCoords.y}).press().release().perform();
+            console.log(`   ✅ Next cliqué (${nextCoords.x},${nextCoords.y})`);
+        }
+        await sleep(3000);
+        state.screenshot = await browserRef.takeScreenshot();
+        const url = await browserRef.getCurrentUrl();
+        console.log("   URL : " + url);
+        if (!url.includes('emailsignup')) {
+            state.status = 'waiting_code';
+            return res.json({ ok:true, msg:'✅ Captcha validé — en attente du code !' });
+        }
+        res.json({ ok:true, msg:'⚠️ Next cliqué — vérifie le screenshot' });
+    } catch(e) {
         res.json({ ok:false, msg:'❌ ' + e.message });
     }
 });
