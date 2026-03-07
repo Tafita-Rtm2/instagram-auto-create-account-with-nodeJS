@@ -4,8 +4,7 @@
   "description": "Instagram Bot on Render",
   "main": "createAccount.js",
   "scripts": {
-    "start": "node createAccount.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node createAccount.js"
   },
   "author": "Alan H",
   "license": "ISC",
@@ -17,6 +16,6 @@
     "random-username-generator": "^1.0.4",
     "request": "^2.88.2",
     "rr-guerrillamail": "^0.2.0",
-    "selenium-webdriver": "^4.0.0-alpha.7"
+    "selenium-webdriver": "^4.10.0"
   }
 }
