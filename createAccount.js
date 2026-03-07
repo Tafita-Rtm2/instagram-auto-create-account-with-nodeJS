@@ -410,78 +410,75 @@ app.post('/inject-date-and-submit', async (req, res) => {
 
         state.screenshot = await browserRef.takeScreenshot();
 
-        // Trouver et cliquer le bouton Submit via ses coordonnées réelles
-        const { Actions } = require('selenium-webdriver');
+        // ── SCROLL BAS + CLIC SUBMIT ─────────────────────────────────────────
+        // Scroller tout en bas de la page pour faire apparaître le bouton Submit
+        await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
+        await sleep(1000);
+        state.screenshot = await browserRef.takeScreenshot();
+
         let submitOk = false;
+        for (let si = 0; si < 6; si++) {
+            // Scroller encore pour s'assurer que le bouton est visible
+            await browserRef.executeScript("window.scrollTo(0, document.body.scrollHeight);");
+            await sleep(500);
 
-        for (let si = 0; si < 5; si++) {
-            // Récupérer les coordonnées du bouton Submit
-            const btnInfo = await browserRef.executeScript(`
-                var btns = Array.from(document.querySelectorAll('button'));
-                var btn = null;
-                for (var i = 0; i < btns.length; i++) {
-                    var t = (btns[i].getAttribute('type')||'').toLowerCase();
-                    var txt = btns[i].textContent.trim();
-                    if (t === 'submit' || /^submit$/i.test(txt) || /^next$/i.test(txt) || /^sign up$/i.test(txt)) { btn = btns[i]; break; }
-                }
-                if (!btn) {
-                    for (var i = btns.length-1; i >= 0; i--) {
-                        var r = btns[i].getBoundingClientRect();
-                        if (r.width > 100 && r.height > 30) { btn = btns[i]; break; }
-                    }
-                }
-                if (!btn) return null;
-                btn.removeAttribute('disabled');
-                btn.scrollIntoView({block:'center', behavior:'instant'});
-                var rect = btn.getBoundingClientRect();
-                return {
-                    txt: btn.textContent.trim(),
-                    x: Math.round(rect.left + rect.width/2),
-                    y: Math.round(rect.top + rect.height/2),
-                    w: Math.round(rect.width),
-                    h: Math.round(rect.height)
-                };
-            `);
-            console.log(`   Submit essai ${si+1} : ${JSON.stringify(btnInfo)}`);
+            // Trouver le bouton Submit via Selenium (type=submit ou texte "Submit")
+            let submitBtn = null;
+            try {
+                submitBtn = await browserRef.findElement(By.xpath("//button[@type='submit']"));
+            } catch(e) {}
+            if (!submitBtn) {
+                try {
+                    submitBtn = await browserRef.findElement(By.xpath("//button[normalize-space(text())='Submit' or normalize-space(text())='Next' or normalize-space(text())='Sign up']"));
+                } catch(e) {}
+            }
+            if (!submitBtn) {
+                // Dernier bouton dans le DOM
+                const allBtns = await browserRef.findElements(By.tagName('button'));
+                if (allBtns.length > 0) submitBtn = allBtns[allBtns.length - 1];
+            }
 
-            if (btnInfo && btnInfo.x > 0) {
-                // Cliquer via Actions Selenium (clic physique sur les coordonnées)
-                await browserRef.executeScript(`
-                    var el = document.elementFromPoint(arguments[0], arguments[1]);
-                    if (el) {
-                        // Remonter jusqu'au bouton
-                        while (el && el.tagName !== 'BUTTON') el = el.parentElement;
-                        if (el) {
-                            el.removeAttribute('disabled');
-                            el.click();
-                            el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, clientX:arguments[0], clientY:arguments[1]}));
-                            el.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, clientX:arguments[0], clientY:arguments[1]}));
-                            el.dispatchEvent(new PointerEvent('pointerup', {bubbles:true, clientX:arguments[0], clientY:arguments[1]}));
-                        }
-                    }
-                `, btnInfo.x, btnInfo.y);
-                console.log(`   Clic physique à (${btnInfo.x}, ${btnInfo.y})`);
+            if (submitBtn) {
+                try {
+                    // Supprimer disabled
+                    await browserRef.executeScript("arguments[0].removeAttribute('disabled'); arguments[0].removeAttribute('aria-disabled');", submitBtn);
+                    // Scroller vers le bouton
+                    await browserRef.executeScript("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", submitBtn);
+                    await sleep(600);
+                    state.screenshot = await browserRef.takeScreenshot();
+                    // Clic Selenium natif
+                    await submitBtn.click();
+                    console.log(`   ✅ Submit cliqué (essai ${si+1})`);
+                } catch(e) {
+                    // Si le clic échoue (ex: intercepté), forcer via JS
+                    await browserRef.executeScript("arguments[0].click();", submitBtn);
+                    console.log(`   Submit JS fallback (essai ${si+1}) : ${e.message}`);
+                }
+            } else {
+                console.log(`   Essai ${si+1} : aucun bouton trouvé`);
             }
 
             await sleep(3000);
             const url = await browserRef.getCurrentUrl();
-            console.log(`   URL : ${url}`);
+            console.log(`   URL essai ${si+1} : ${url}`);
             state.screenshot = await browserRef.takeScreenshot();
 
             if (!url.includes('emailsignup')) {
                 submitOk = true;
-                console.log("✅ Page changée !");
+                console.log("✅ Page changée — Submit réussi !");
                 break;
             }
-            const codeField = await browserRef.executeScript(`
-                return !!document.querySelector('input[name="confirmationCode"],input[inputmode="numeric"],input[autocomplete="one-time-code"]');
-            `);
-            if (codeField) { submitOk = true; console.log("✅ Champ code apparu !"); break; }
-            await sleep(1000);
+            // Vérifier si champ code apparu sur la même page
+            try {
+                await browserRef.findElement(By.xpath("//input[@inputmode='numeric' or @name='confirmationCode' or @autocomplete='one-time-code']"));
+                submitOk = true;
+                console.log("✅ Champ code apparu !");
+                break;
+            } catch(e) {}
         }
 
         state.status = 'waiting_code';
-        res.json({ ok:true, msg: submitOk ? '✅ Compte soumis avec succes !' : '⚠️ Submit envoye — verifie le screenshot' });
+        res.json({ ok:true, msg: submitOk ? '✅ Compte soumis !' : '⚠️ Submit envoye — verifie le screenshot' });
 
     } catch(e) {
         console.error("❌ inject : " + e.message);
