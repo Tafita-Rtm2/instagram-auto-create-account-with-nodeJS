@@ -10,8 +10,8 @@ const app = express();
 const port = process.env.PORT || 10000;
 app.get('/', (req, res) => {
     if (fs.existsSync('error_screenshot.png')) {
-        res.send('<h1>Statut du Bot</h1><img src="/debug-image" style="width:100%;max-width:500px;">');
-    } else { res.send('Bot en attente...'); }
+        res.send('<h1>Aperçu du Bot</h1><img src="/debug-image" style="width:100%;max-width:500px;">');
+    } else { res.send('Bot actif - En attente du formulaire...'); }
 });
 app.get('/debug-image', (req, res) => { res.sendFile(path.join(process.cwd(), 'error_screenshot.png')); });
 app.listen(port, '0.0.0.0');
@@ -30,7 +30,7 @@ async function getFakeMail() {
 async function humanType(element, text) {
     for (let char of text) {
         await element.sendKeys(char);
-        await sleep(Math.random() * 100 + 50);
+        await sleep(Math.random() * 80 + 40);
     }
 }
 
@@ -48,66 +48,71 @@ async function humanType(element, text) {
     let browser = await new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(service).build();
 
     try {
-        console.log("Navigation...");
+        console.log("Navigation initiale...");
         await browser.get("https://www.instagram.com/accounts/signup/email/");
-        await sleep(6000);
+        await sleep(8000);
 
-        // 1. EMAIL
-        console.log("Saisie Email...");
-        let emailInput = await browser.wait(until.elementLocated(By.name("emailOrPhone")), 15000);
-        let mail = await getFakeMail();
-        await emailInput.click();
-        await humanType(emailInput, mail);
-        
-        // --- LE SECRET : ON CLIQUE AILLEURS POUR DÉBLOQUER ---
-        await browser.findElement(By.xpath("//h2 | //span[contains(text(), 'Instagram')]")).click();
+        // --- ÉTAPE 1 : EMAIL (REBOUCLAGE SI ÉCHEC) ---
+        let emailInput;
+        try {
+            emailInput = await browser.wait(until.elementLocated(By.xpath("//input[contains(@name,'emailOrPhone')] | //input[@type='text']")), 15000);
+            let mail = await getFakeMail();
+            console.log("Saisie Email : " + mail);
+            await emailInput.click();
+            await humanType(emailInput, mail);
+        } catch (e) {
+            console.log("Rafraîchissement car champ email non trouvé...");
+            await browser.navigate().refresh();
+            await sleep(5000);
+            emailInput = await browser.wait(until.elementLocated(By.name("emailOrPhone")), 10000);
+            await emailInput.sendKeys(await getFakeMail());
+        }
+
+        // --- ÉTAPE 2 : LE PASSWORD (POINT CRITIQUE) ---
+        console.log("Recherche Password...");
+        // On clique sur le titre pour valider l'email
+        await browser.executeScript("document.querySelector('h2').click();");
         await sleep(2000);
 
-        // 2. PASSWORD
-        console.log("Saisie Password...");
         let passInput = await browser.wait(until.elementLocated(By.name("password")), 15000);
         await passInput.click();
         await humanType(passInput, "Azerty12345!");
-        await sleep(1000);
 
-        // 3. DATE
+        // --- ÉTAPE 3 : DATE ---
         console.log("Saisie Date...");
         let selects = await browser.findElements(By.tagName("select"));
         if(selects.length >= 3) {
             await selects[0].sendKeys("March");
+            await sleep(500);
             await selects[1].sendKeys("10");
+            await sleep(500);
             await selects[2].sendKeys("1998");
         }
-        await sleep(1000);
 
-        // 4. NAME
-        console.log("Saisie Nom...");
+        // --- ÉTAPE 4 : NOM & USER ---
+        console.log("Saisie Identité...");
         let nameInput = await browser.wait(until.elementLocated(By.name("fullName")), 10000);
-        await nameInput.click();
         await humanType(nameInput, "Alan Azad");
 
-        // 5. USERNAME
-        console.log("Saisie Username...");
         let userInput = await browser.wait(until.elementLocated(By.name("username")), 10000);
-        await userInput.click();
-        await humanType(userInput, "azad_alan_" + Math.floor(Math.random()*999));
+        await humanType(userInput, "azad_alan_" + Math.floor(Math.random()*9999));
 
-        // Screenshot final pour Render
-        await sleep(2000);
+        // Screenshot final
+        await sleep(3000);
         let pic = await browser.takeScreenshot();
         fs.writeFileSync('error_screenshot.png', pic, 'base64');
 
-        // 6. SUBMIT
-        let btn = await browser.findElement(By.xpath("//button[@type='submit']"));
+        // --- ÉTAPE 5 : SUBMIT ---
+        let btn = await browser.wait(until.elementLocated(By.xpath("//button[@type='submit']")), 10000);
         await btn.click();
-        console.log("Formulaire envoyé !");
+        console.log("Bouton cliqué !");
 
     } catch (e) {
-        console.error("ERREUR : " + e.message);
+        console.error("ERREUR GÉNÉRALE : " + e.message);
         let img = await browser.takeScreenshot();
         fs.writeFileSync('error_screenshot.png', img, 'base64');
     } finally {
-        await sleep(15000);
+        await sleep(20000);
         await browser.quit();
     }
 })();
