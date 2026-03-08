@@ -51,20 +51,8 @@ app.get('/api/poll-code', async (req, res) => {
     res.json({ code: null });
 });
 
-// Proxy toutes les requêtes Instagram (CORS bypass)
-// ── Liste de proxies CORS publics rotatifs ───────────────────────────────────
-const CORS_PROXIES = [
-    'https://corsproxy.io/?url=',
-    'https://proxy.cors.sh/',
-    'https://corsproxy.io/?url=',   // retry corsproxy avec autre index
-    'https://proxy.cors.sh/',
-];
-let proxyIdx = 0;
-function nextProxy() {
-    const p = CORS_PROXIES[proxyIdx % CORS_PROXIES.length];
-    proxyIdx++;
-    return p;
-}
+// ── Requêtes Instagram directement depuis le serveur (pas de proxy CORS) ────────
+const IG_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 app.post('/api/ig', async (req, res) => {
     const { url, body, csrf, cookieStr, referer } = req.body;
@@ -75,101 +63,61 @@ app.post('/api/ig', async (req, res) => {
     const endpoint = url.split('/').filter(Boolean).pop();
     slog('📡 ' + endpoint);
 
-    // Essayer chaque proxy jusqu'à en trouver un qui marche
-    const errors = [];
-    for (let attempt = 0; attempt < CORS_PROXIES.length; attempt++) {
-        const proxy   = nextProxy();
-        const fullUrl = proxy + encodeURIComponent(url);
-        try {
-            slog('   🔀 via ' + proxy.split('/')[2]);
-            const r = await fetch(fullUrl, {
-                method : 'POST',
-                headers: {
-                    'Content-Type'    : 'application/x-www-form-urlencoded',
-                    'X-CSRFToken'     : csrf || '',
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Referer'         : referer || 'https://www.instagram.com/',
-                    'Cookie'          : cookieStr || '',
-                    'Origin'          : 'https://www.instagram.com',
-                    'x-requested-with': 'XMLHttpRequest',
-                },
-                body,
-                timeout: 12000,
-            });
-            const text = await r.text();
-            slog('   → ' + r.status + ' ' + text.substring(0, 120));
-            if (r.status === 429 || text.includes('"spam":true')) {
-                errors.push('429/spam sur ' + proxy.split('/')[2]);
-                continue;
-            }
-            if (text.trimStart().startsWith('<')) {
-                errors.push('HTML reçu (POST non supporté) sur ' + proxy.split('/')[2]);
-                slog('   ⚠️ HTML reçu — proxy ne supporte pas POST');
-                continue;
-            }
-            try { return res.json(JSON.parse(text)); }
-            catch(e) { return res.json({ error: text.substring(0, 300) }); }
-        } catch(e) {
-            errors.push(proxy.split('/')[2] + ': ' + e.message);
-            slog('   ⚠️ ' + proxy.split('/')[2] + ' : ' + e.message);
+    try {
+        const r = await fetch(url, {
+            method : 'POST',
+            headers: {
+                'User-Agent'      : IG_UA,
+                'Content-Type'    : 'application/x-www-form-urlencoded',
+                'X-CSRFToken'     : csrf || '',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer'         : referer || 'https://www.instagram.com/',
+                'Cookie'          : cookieStr || '',
+                'Origin'          : 'https://www.instagram.com',
+                'Accept'          : '*/*',
+                'Accept-Language' : 'en-US,en;q=0.9',
+                'sec-fetch-site'  : 'same-origin',
+                'sec-fetch-mode'  : 'cors',
+                'sec-fetch-dest'  : 'empty',
+            },
+            body,
+            timeout: 15000,
+        });
+        const text = await r.text();
+        slog('   → ' + r.status + ' ' + text.substring(0, 120));
+
+        // Récupérer les nouveaux cookies si Instagram en envoie
+        const setCookies = r.headers.raw()['set-cookie'] || [];
+        const newCookies = {};
+        for (const c of setCookies) {
+            const p = c.split(';')[0].trim(), i = p.indexOf('=');
+            if (i > 0) newCookies[p.substring(0, i).trim()] = p.substring(i + 1).trim();
         }
+
+        try {
+            const json = JSON.parse(text);
+            return res.json({ ...json, _newCookies: newCookies });
+        } catch(e) {
+            return res.json({ error: text.substring(0, 300), _newCookies: newCookies });
+        }
+    } catch(e) {
+        slog('   ❌ Erreur : ' + e.message);
+        res.json({ error: e.message });
     }
-    slog('   ❌ Tous les proxies ont échoué : ' + errors.join(' | '));
-    res.json({ error: 'Tous les proxies bloqués', details: errors });
 });
 
-// CSRF via proxy rotatif
+// CSRF directement depuis le serveur
 app.get('/api/csrf', async (req, res) => {
-    for (let attempt = 0; attempt < CORS_PROXIES.length; attempt++) {
-        const proxy = nextProxy();
-        try {
-            const r = await fetch(proxy + encodeURIComponent('https://www.instagram.com/'), {
-                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36' },
-                timeout: 10000
-            });
-            // Chercher csrf dans les headers
-            const raw = r.headers.raw()['set-cookie'] || [];
-            const map = {};
-            for (const c of raw) {
-                const p = c.split(';')[0].trim(), i = p.indexOf('=');
-                if (i > 0) map[p.substring(0, i).trim()] = p.substring(i + 1).trim();
-            }
-            // Chercher aussi dans x-cors-headers
-            try {
-                const xch = r.headers.get('x-cors-headers');
-                if (xch) {
-                    const parsed = JSON.parse(xch);
-                    const sc = Array.isArray(parsed['set-cookie']) ? parsed['set-cookie'] : [parsed['set-cookie'] || ''];
-                    for (const c of sc) {
-                        if (!c) continue;
-                        const p = c.split(';')[0].trim(), i = p.indexOf('=');
-                        if (i > 0) map[p.substring(0, i).trim()] = p.substring(i + 1).trim();
-                    }
-                }
-            } catch(e2) {}
-            // Chercher dans le HTML si pas dans les cookies
-            if (!map['csrftoken']) {
-                const html = await r.text();
-                const m = html.match(/"csrf_token"\s*:\s*"([^"]+)"/);
-                if (m) map['csrftoken'] = m[1];
-                const m2 = html.match(/csrftoken=([a-zA-Z0-9_-]{20,})/);
-                if (m2 && !map['csrftoken']) map['csrftoken'] = m2[1];
-            }
-            const csrf      = map['csrftoken'] || '';
-            const mid       = map['mid'] || ('mid_' + Math.random().toString(36).slice(2, 14));
-            const cookieStr = Object.entries(map).map(e => e[0] + '=' + e[1]).join('; ');
-            if (csrf) {
-                slog('🔐 CSRF via ' + proxy.split('/')[2] + ' : ' + csrf.substring(0, 10));
-                return res.json({ csrf, mid, cookieStr });
-            }
-        } catch(e) {
-            slog('⚠️ CSRF proxy ' + proxy.split('/')[2] + ' : ' + e.message);
-        }
-    }
-    // Fallback direct (IP Render)
     try {
         const r = await fetch('https://www.instagram.com/', {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36' }
+            headers: {
+                'User-Agent'     : IG_UA,
+                'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection'     : 'keep-alive',
+            },
+            timeout: 12000,
         });
         const raw = r.headers.raw()['set-cookie'] || [];
         const map = {};
@@ -177,12 +125,21 @@ app.get('/api/csrf', async (req, res) => {
             const p = c.split(';')[0].trim(), i = p.indexOf('=');
             if (i > 0) map[p.substring(0, i).trim()] = p.substring(i + 1).trim();
         }
-        const csrf = map['csrftoken'] || '';
-        const mid  = map['mid'] || ('mid_' + Math.random().toString(36).slice(2, 14));
+        // Chercher dans le HTML aussi
+        if (!map['csrftoken']) {
+            const html = await r.text();
+            const m = html.match(/"csrf_token"\s*:\s*"([^"]+)"/);
+            if (m) map['csrftoken'] = m[1];
+            const m2 = html.match(/csrftoken=([a-zA-Z0-9_-]{20,})/);
+            if (m2 && !map['csrftoken']) map['csrftoken'] = m2[1];
+        }
+        const csrf      = map['csrftoken'] || '';
+        const mid       = map['mid'] || ('mid_' + Math.random().toString(36).slice(2, 14));
         const cookieStr = Object.entries(map).map(e => e[0] + '=' + e[1]).join('; ');
-        slog('🔐 CSRF direct : ' + csrf.substring(0, 10));
+        slog('🔐 CSRF : ' + (csrf ? csrf.substring(0, 10) + '…' : '❌ vide'));
         res.json({ csrf, mid, cookieStr });
     } catch(e) {
+        slog('⚠️ CSRF erreur : ' + e.message);
         res.json({ csrf: '', mid: 'mid_' + Math.random().toString(36).slice(2, 14), cookieStr: '' });
     }
 });
@@ -343,14 +300,27 @@ function enc(obj) {
     return Object.entries(obj).map(([k,v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
 }
 
-// ── Appel proxy serveur pour Instagram (CORS) ─────────────────────────────────
+// ── Appel serveur pour Instagram ──────────────────────────────────────────────
 async function ig(url, body, referer) {
     const r = await fetch('/api/ig', {
         method : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body   : JSON.stringify({ url, body, csrf, cookieStr, referer: referer || 'https://www.instagram.com/' })
     });
-    return r.json();
+    const data = await r.json();
+    // Mettre à jour les cookies si le serveur en renvoie de nouveaux
+    if (data._newCookies && Object.keys(data._newCookies).length > 0) {
+        const existing = {};
+        for (const part of cookieStr.split(';')) {
+            const i = part.indexOf('=');
+            if (i > 0) existing[part.substring(0,i).trim()] = part.substring(i+1).trim();
+        }
+        Object.assign(existing, data._newCookies);
+        cookieStr = Object.entries(existing).map(e => e[0]+'='+e[1]).join('; ');
+        if (data._newCookies.csrftoken) csrf = data._newCookies.csrftoken;
+        delete data._newCookies;
+    }
+    return data;
 }
 
 // ── Init infos compte ──────────────────────────────────────────────────────────
