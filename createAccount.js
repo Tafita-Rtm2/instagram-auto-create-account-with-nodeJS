@@ -802,15 +802,17 @@ async function createOneAccount(log) {
     mergeNewCookies(chk);
     if (!chk.signup_code) { result.error = 'bad_code'; return result; }
 
-    // Étape 4 : création finale
-    log('📡 Étape 4 : web_create_ajax…');
+    // Étape 4 : création finale - CSRF frais
+    const csrfMatch = cookieStr.match(/csrftoken=([^;]+)/);
+    const freshCsrf = csrfMatch ? csrfMatch[1] : csrf;
+    log('📡 Étape 4 : web_create_ajax… csrf=' + freshCsrf.substring(0,8));
     const final = await igPost('https://www.instagram.com/accounts/web_create_ajax/',
         enc({ enc_password: '#PWD_INSTAGRAM_BROWSER:0:'+Math.floor(Date.now()/1000)+':'+PASSWORD,
               email: result.email, username: result.uName, first_name: result.fullName,
               month: String(randomM), day: String(randomD), year: String(randomY),
               opt_into_one_tap: 'false', client_id: mid, seamless_login_enabled: '1',
               tos_version: 'row', force_sign_up_code: chk.signup_code }),
-        csrf, cookieStr, 'https://www.instagram.com/accounts/emailsignup/');
+        freshCsrf, cookieStr, 'https://www.instagram.com/accounts/emailsignup/');
     mergeNewCookies(final);
 
     if (!(final.account_created || final.user_id)) {
