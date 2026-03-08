@@ -289,14 +289,19 @@ async function handleCheckpoint(checkpointUrl, cookieStr, csrf, log) {
         const hasCaptcha = html.includes('captcha') || html.includes('Saisissez le code') || html.includes('code affiché');
         if (hasCaptcha) {
             log('🔢 Étape 2 : captcha image…');
-            // Extraire URL image captcha
-            const imgMatch = html.match(/src="(https?:\/\/[^"]*(?:captcha|challenge)[^"]*)"/)
-                           || html.match(/<img[^>]+class="[^"]*captcha[^"]*"[^>]+src="([^"]+)"/)
-                           || html.match(/<img[^>]+src="(\/challenge\/[^"]+)"/)
-                           || html.match(/<img[^>]+src="([^"]+\.(?:jpg|jpeg|png)(?:\?[^"]*)?)"[^>]*>/i);
+            // Instagram met l'image captcha dans différents formats — essayer plusieurs patterns
+            const imgMatch = html.match(/src="(https:\/\/www\.instagram\.com\/challenge\/[^"]+)"/)
+                           || html.match(/src="(\/challenge\/[^"]+\.(?:jpg|jpeg|png|gif)[^"]*)"/)
+                           || html.match(/src="([^"]+challenge[^"]+\.(?:jpg|jpeg|png)[^"]*)"/)
+                           || html.match(/<img[^>]+id="[^"]*captcha[^"]*"[^>]+src="([^"]+)"/)
+                           || html.match(/<img[^>]+src="([^"]+)"[^>]*alt="[^"]*captcha[^"]*"/i)
+                           // Pattern générique : première image qui ressemble à un captcha
+                           || html.match(/<img[^>]+src="(https:\/\/[^"]+(?:captcha|challenge|verify)[^"]+)"/)
+                           // Dernier recours : toutes les images
+                           || html.match(/<img[^>]+src="(https?:\/\/[^"]{20,})"/);
 
             if (imgMatch) {
-                const imgUrl = imgMatch[1].startsWith('http') ? imgMatch[1] : baseUrl + imgMatch[1];
+                const imgUrl = imgMatch[1].startsWith('http') ? imgMatch[1] : 'https://www.instagram.com' + imgMatch[1];
                 log('🖼️ OCR image : ' + imgUrl.substring(0, 70));
                 const captchaText = await ocrImage(imgUrl, cookieStr);
                 log('🔢 OCR résultat : "' + captchaText + '"');
@@ -323,7 +328,9 @@ async function handleCheckpoint(checkpointUrl, cookieStr, csrf, log) {
                     return false;
                 }
             } else {
-                log('⚠️ Image captcha non trouvée dans le HTML');
+                // Debug : afficher un extrait du HTML pour comprendre le format
+                const htmlSnip = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').substring(0, 200);
+                log('⚠️ Image captcha non trouvée. HTML: ' + htmlSnip);
                 return false;
             }
         }
@@ -420,17 +427,37 @@ async function createOneAccount(log) {
         }
     };
 
-    // Étape 1 : dry run
+    // Étape 1 : dry run — avec retry username si déjà pris
     log('📡 Étape 1 : dry run…');
     const randomY = 1980 + Math.floor(Math.random() * 25);
     const randomM = 1    + Math.floor(Math.random() * 12);
     const randomD = 1    + Math.floor(Math.random() * 28);
-    const dry = await igPost('https://www.instagram.com/accounts/web_create_ajax/attempt/',
-        enc({ enc_password: '#PWD_INSTAGRAM_BROWSER:0:'+Math.floor(Date.now()/1000)+':'+PASSWORD,
-              email: result.email, username: result.uName, first_name: result.fullName,
-              opt_into_one_tap: 'false', client_id: mid, seamless_login_enabled: '1' }),
-        csrf, cookieStr, 'https://www.instagram.com/accounts/emailsignup/');
-    mergeNewCookies(dry);
+
+    let dry, usernameAttempts = 0;
+    while (usernameAttempts < 5) {
+        dry = await igPost('https://www.instagram.com/accounts/web_create_ajax/attempt/',
+            enc({ enc_password: '#PWD_INSTAGRAM_BROWSER:0:'+Math.floor(Date.now()/1000)+':'+PASSWORD,
+                  email: result.email, username: result.uName, first_name: result.fullName,
+                  opt_into_one_tap: 'false', client_id: mid, seamless_login_enabled: '1' }),
+            csrf, cookieStr, 'https://www.instagram.com/accounts/emailsignup/');
+        mergeNewCookies(dry);
+
+        // Username déjà pris → générer un nouveau et réessayer
+        if (dry.errors && (dry.errors.username || dry.username_suggestions)) {
+            const oldUName = result.uName;
+            // Utiliser une suggestion d'Instagram si dispo
+            if (dry.username_suggestions && dry.username_suggestions.length > 0) {
+                result.uName = dry.username_suggestions[0];
+            } else {
+                result.uName = username();
+            }
+            log('♻️ Username @' + oldUName + ' pris → essai @' + result.uName);
+            usernameAttempts++;
+            continue;
+        }
+        break;
+    }
+
     if (dry.errors && Object.keys(dry.errors).length > 0) {
         result.error = JSON.stringify(dry.errors).substring(0, 100);
         return result;
