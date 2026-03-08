@@ -52,38 +52,117 @@ app.get('/api/poll-code', async (req, res) => {
 });
 
 // Proxy toutes les requêtes Instagram (CORS bypass)
+// ── Liste de proxies CORS publics rotatifs ───────────────────────────────────
+const CORS_PROXIES = [
+    'https://corsproxy.io/?url=',
+    'https://api.allorigins.win/raw?url=',
+    'https://proxy.cors.sh/',
+    'https://cors-anywhere.herokuapp.com/',
+    'https://thingproxy.freeboard.io/fetch/',
+];
+let proxyIdx = 0;
+function nextProxy() {
+    const p = CORS_PROXIES[proxyIdx % CORS_PROXIES.length];
+    proxyIdx++;
+    return p;
+}
+
 app.post('/api/ig', async (req, res) => {
     const { url, body, csrf, cookieStr, referer } = req.body;
     const allowed = ['https://www.instagram.com', 'https://i.instagram.com'];
     if (!url || !allowed.some(a => url.startsWith(a)))
         return res.status(400).json({ error: 'URL non autorisée' });
-    try {
-        slog('📡 ' + url.split('/').filter(Boolean).pop());
-        const r = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'User-Agent'      : 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36',
-                'Content-Type'    : 'application/x-www-form-urlencoded',
-                'X-CSRFToken'     : csrf || '',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer'         : referer || 'https://www.instagram.com/',
-                'Cookie'          : cookieStr || '',
-                'Origin'          : 'https://www.instagram.com',
-            },
-            body
-        });
-        const text = await r.text();
-        slog('   → ' + r.status + ' ' + text.substring(0, 120));
-        try { res.json(JSON.parse(text)); }
-        catch(e) { res.json({ error: text.substring(0, 300) }); }
-    } catch(e) {
-        slog('   ❌ ' + e.message);
-        res.json({ error: e.message });
+
+    const endpoint = url.split('/').filter(Boolean).pop();
+    slog('📡 ' + endpoint);
+
+    // Essayer chaque proxy jusqu'à en trouver un qui marche
+    const errors = [];
+    for (let attempt = 0; attempt < CORS_PROXIES.length; attempt++) {
+        const proxy   = nextProxy();
+        const fullUrl = proxy + encodeURIComponent(url);
+        try {
+            slog('   🔀 via ' + proxy.split('/')[2]);
+            const r = await fetch(fullUrl, {
+                method : 'POST',
+                headers: {
+                    'Content-Type'    : 'application/x-www-form-urlencoded',
+                    'X-CSRFToken'     : csrf || '',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Referer'         : referer || 'https://www.instagram.com/',
+                    'Cookie'          : cookieStr || '',
+                    'Origin'          : 'https://www.instagram.com',
+                    'x-requested-with': 'XMLHttpRequest',
+                },
+                body,
+                timeout: 12000,
+            });
+            const text = await r.text();
+            slog('   → ' + r.status + ' ' + text.substring(0, 120));
+            if (r.status === 429 || (text.includes('"spam":true'))) {
+                errors.push('429/spam sur ' + proxy.split('/')[2]);
+                continue; // essayer prochain proxy
+            }
+            try { return res.json(JSON.parse(text)); }
+            catch(e) { return res.json({ error: text.substring(0, 300) }); }
+        } catch(e) {
+            errors.push(proxy.split('/')[2] + ': ' + e.message);
+            slog('   ⚠️ ' + proxy.split('/')[2] + ' : ' + e.message);
+        }
     }
+    slog('   ❌ Tous les proxies ont échoué : ' + errors.join(' | '));
+    res.json({ error: 'Tous les proxies bloqués', details: errors });
 });
 
-// CSRF depuis le serveur
+// CSRF via proxy rotatif
 app.get('/api/csrf', async (req, res) => {
+    for (let attempt = 0; attempt < CORS_PROXIES.length; attempt++) {
+        const proxy = nextProxy();
+        try {
+            const r = await fetch(proxy + encodeURIComponent('https://www.instagram.com/'), {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36' },
+                timeout: 10000
+            });
+            // Chercher csrf dans les headers
+            const raw = r.headers.raw()['set-cookie'] || [];
+            const map = {};
+            for (const c of raw) {
+                const p = c.split(';')[0].trim(), i = p.indexOf('=');
+                if (i > 0) map[p.substring(0, i).trim()] = p.substring(i + 1).trim();
+            }
+            // Chercher aussi dans x-cors-headers
+            try {
+                const xch = r.headers.get('x-cors-headers');
+                if (xch) {
+                    const parsed = JSON.parse(xch);
+                    const sc = Array.isArray(parsed['set-cookie']) ? parsed['set-cookie'] : [parsed['set-cookie'] || ''];
+                    for (const c of sc) {
+                        if (!c) continue;
+                        const p = c.split(';')[0].trim(), i = p.indexOf('=');
+                        if (i > 0) map[p.substring(0, i).trim()] = p.substring(i + 1).trim();
+                    }
+                }
+            } catch(e2) {}
+            // Chercher dans le HTML si pas dans les cookies
+            if (!map['csrftoken']) {
+                const html = await r.text();
+                const m = html.match(/"csrf_token"\s*:\s*"([^"]+)"/);
+                if (m) map['csrftoken'] = m[1];
+                const m2 = html.match(/csrftoken=([a-zA-Z0-9_-]{20,})/);
+                if (m2 && !map['csrftoken']) map['csrftoken'] = m2[1];
+            }
+            const csrf      = map['csrftoken'] || '';
+            const mid       = map['mid'] || ('mid_' + Math.random().toString(36).slice(2, 14));
+            const cookieStr = Object.entries(map).map(e => e[0] + '=' + e[1]).join('; ');
+            if (csrf) {
+                slog('🔐 CSRF via ' + proxy.split('/')[2] + ' : ' + csrf.substring(0, 10));
+                return res.json({ csrf, mid, cookieStr });
+            }
+        } catch(e) {
+            slog('⚠️ CSRF proxy ' + proxy.split('/')[2] + ' : ' + e.message);
+        }
+    }
+    // Fallback direct (IP Render)
     try {
         const r = await fetch('https://www.instagram.com/', {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.120 Safari/537.36' }
@@ -94,13 +173,13 @@ app.get('/api/csrf', async (req, res) => {
             const p = c.split(';')[0].trim(), i = p.indexOf('=');
             if (i > 0) map[p.substring(0, i).trim()] = p.substring(i + 1).trim();
         }
-        const csrf      = map['csrftoken'] || '';
-        const mid       = map['mid'] || '';
+        const csrf = map['csrftoken'] || '';
+        const mid  = map['mid'] || ('mid_' + Math.random().toString(36).slice(2, 14));
         const cookieStr = Object.entries(map).map(e => e[0] + '=' + e[1]).join('; ');
-        slog('🔐 CSRF : ' + csrf.substring(0, 10));
+        slog('🔐 CSRF direct : ' + csrf.substring(0, 10));
         res.json({ csrf, mid, cookieStr });
     } catch(e) {
-        res.json({ csrf: '', mid: '', cookieStr: '' });
+        res.json({ csrf: '', mid: 'mid_' + Math.random().toString(36).slice(2, 14), cookieStr: '' });
     }
 });
 
