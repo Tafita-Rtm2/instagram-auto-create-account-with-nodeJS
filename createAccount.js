@@ -482,11 +482,41 @@ async function createOneAccount(log) {
     log('🎉 Compte créé @' + result.uName + ' !');
     result.success = true;
 
-    // Checkpoint (suspension / vérification identité)
-    if (final.checkpoint_url) {
-        log('🔒 Checkpoint détecté — tentative résolution auto…');
-        const resolved = await handleCheckpoint(final.checkpoint_url, cookieStr, csrf, log);
-        log(resolved ? '✅ Checkpoint résolu !' : '⚠️ Checkpoint non résolu — compte peut nécessiter vérification manuelle');
+    // ── Vérifier si le compte est suspendu / checkpoint requis ───────────────
+    // Instagram peut créer le compte ET le suspendre immédiatement
+    // On vérifie en tentant de charger le profil
+    log('🔍 Vérification statut compte…');
+    await sleep(2000);
+    try {
+        const profileResp = await makeFetch('https://www.instagram.com/' + result.uName + '/?__a=1', {
+            headers: { 'User-Agent': IG_UA, 'Cookie': cookieStr, 'Accept': '*/*' },
+            redirect: 'manual', timeout: 10000,
+        });
+        const location = profileResp.headers.get('location') || '';
+        const profileText = await profileResp.text().catch(() => '');
+        
+        const isSuspended = location.includes('suspended') || profileText.includes('suspended')
+                         || location.includes('challenge') || profileText.includes('challenge');
+        
+        if (isSuspended || final.checkpoint_url) {
+            const cpUrl = final.checkpoint_url 
+                       || location 
+                       || '/accounts/suspended/?next=%2F';
+            log('🔒 Compte suspendu — lancement checkpoint auto…');
+            const resolved = await handleCheckpoint(cpUrl, cookieStr, csrf, log);
+            log(resolved ? '✅ Checkpoint résolu — compte actif !' : '⚠️ Checkpoint non résolu');
+            result.checkpointResolved = resolved;
+        } else {
+            log('✅ Compte actif — pas de suspension !');
+            result.checkpointResolved = true;
+        }
+    } catch(e) {
+        log('⚠️ Vérif statut : ' + e.message);
+        // Tenter quand même le checkpoint si l'URL est connue
+        if (final.checkpoint_url) {
+            const resolved = await handleCheckpoint(final.checkpoint_url, cookieStr, csrf, log);
+            result.checkpointResolved = resolved;
+        }
     }
 
     // Vérification téléphone API si demandée (sans checkpoint)
@@ -773,6 +803,7 @@ function renderAccount(acc) {
         div.innerHTML = \`
             <div style="font-weight:bold;color:#16a34a;margin-bottom:6px">
                 ✅ Compte #\${acc.index}
+                \${acc.checkpointResolved === true ? '<span class="badge b-ok">Actif ✓</span>' : acc.checkpointResolved === false ? '<span class="badge b-warn">Suspendu?</span>' : ''}
                 \${acc.confirmed ? '<span class="badge b-ok">Email ✓</span>' : '<span class="badge b-warn">Email ?</span>'}
                 \${acc.photo ? '<span class="badge b-ok">Photo ✓</span>' : ''}
             </div>
