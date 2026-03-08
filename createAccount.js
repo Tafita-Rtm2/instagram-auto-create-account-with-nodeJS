@@ -1261,9 +1261,9 @@ function renderAccount(acc) {
       '<div class="acc-username">@' + (acc.uName || '') + '</div>' +
       '<div class="acc-name">' + (acc.fullName || '') + '</div>' +
       '<div class="acc-fields">' +
-        '<div class="acc-field"><span class="acc-field-lbl">📧 Email</span><span class="acc-field-val">' + (acc.email || '') + '</span><button class="copy-btn" onclick="cp(\'' + (acc.email || '').replace(/'/g,"\\'") + '\')">Copier</button></div>' +
-        '<div class="acc-field"><span class="acc-field-lbl">🔒 Mdp</span><span class="acc-field-val">' + (acc.password || '') + '</span><button class="copy-btn" onclick="cp(\'' + (acc.password || '').replace(/'/g,"\\'") + '\')">Copier</button></div>' +
-        '<div class="acc-field"><span class="acc-field-lbl">👤 User</span><span class="acc-field-val">@' + (acc.uName || '') + '</span><button class="copy-btn" onclick="cp(\'' + (acc.uName || '').replace(/'/g,"\\'") + '\')">Copier</button></div>' +
+        '<div class="acc-field"><span class="acc-field-lbl">📧 Email</span><span class="acc-field-val">' + (acc.email || '') + '</span><button class="copy-btn" onclick="cp(this.dataset.v)" data-v="' + (acc.email || '') + '">Copier</button></div>' +
+        '<div class="acc-field"><span class="acc-field-lbl">🔒 Mdp</span><span class="acc-field-val">' + (acc.password || '') + '</span><button class="copy-btn" onclick="cp(this.dataset.v)" data-v="' + (acc.password || '') + '">Copier</button></div>' +
+        '<div class="acc-field"><span class="acc-field-lbl">👤 User</span><span class="acc-field-val">@' + (acc.uName || '') + '</span><button class="copy-btn" onclick="cp(this.dataset.v)" data-v="' + (acc.uName || '') + '">Copier</button></div>' +
       '</div>' +
       '<div class="acc-badges">' + badges + '</div>';
   } else {
