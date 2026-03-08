@@ -155,7 +155,6 @@ app.get('/', (req, res) => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Bot Instagram</title>
-  <script src="https://js.hcaptcha.com/1/api.js" async defer></script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:Arial,sans-serif;background:#f0f2f5;min-height:100vh}
@@ -235,13 +234,14 @@ app.get('/', (req, res) => {
         </div>
       </div>
 
-      <!-- hCaptcha (caché par défaut, visible si Instagram le demande) -->
+      <!-- Captcha : iframe vers Instagram (le seul domaine accepté par hCaptcha d'Instagram) -->
       <div class="cap-box" id="cap-box">
         <div style="font-weight:bold;color:#92400e;margin-bottom:6px">🔒 Vérification requise</div>
-        <div style="font-size:12px;color:#666;margin-bottom:8px">Instagram demande une vérification. Résous le captcha puis clique sur Créer.</div>
-        <div class="hcap-wrap">
-          <div class="h-captcha" data-sitekey="13257c65-6cb7-4d3e-a1e0-f4a30e64b80c" id="hcap"></div>
+        <div style="font-size:12px;color:#666;margin-bottom:8px">
+          Clique sur <strong>Ouvrir Instagram</strong>, résous le captcha sur la page Instagram qui s'ouvre, puis reviens ici et clique <strong>Créer</strong>.
         </div>
+        <button class="btn btn-orange" style="margin-bottom:8px" onclick="openIgCap()">🌐 Ouvrir Instagram pour le captcha</button>
+        <div id="cap-status" style="font-size:11px;color:#666;text-align:center">En attente…</div>
       </div>
 
       <button class="btn btn-blue" id="btnCreate" onclick="createAccount()">🚀 Créer le compte !</button>
@@ -414,27 +414,14 @@ async function createAccount() {
     // Récupérer le token captcha si résolu
     let captchaToken = '';
     if (captchaNeeded) {
-        // hCaptcha place le token dans h-captcha-response ET g-recaptcha-response
-        try {
-            const ta = document.querySelector('textarea[name="h-captcha-response"]');
-            captchaToken = ta ? ta.value : '';
-        } catch(e) {}
-        // Fallback : lire via l'API hcaptcha
-        if (!captchaToken && typeof hcaptcha !== 'undefined') {
-            try { captchaToken = hcaptcha.getResponse(); } catch(e) {}
-        }
-        if (!captchaToken) {
-            st('st-create', '⚠️ Résous le captcha d\\'abord !', 'wa');
-            document.getElementById('btnCreate').disabled = false;
-            return;
-        }
-        L('🔒 Captcha token : ' + captchaToken.substring(0, 30) + '…');
+        L('🔒 Captcha : tentative après résolution Instagram…', 'w');
+        await new Promise(r => setTimeout(r, 1000));
     }
 
     const verBody = enc(Object.assign(
         { device_id: mid, email: acct.email },
         captchaToken ? {
-            captcha_token       : captchaToken,
+            captcha_token         : captchaToken,
             'g-recaptcha-response': captchaToken,
         } : {}
     ));
@@ -447,16 +434,11 @@ async function createAccount() {
     L('   verify → ' + JSON.stringify(verData).substring(0, 100));
 
     if (verData.require_captcha) {
-        L('🔒 Captcha requis !', 'w');
-        st('st-create', '🔒 Résous le captcha ci-dessus puis reclique Créer !', 'wa');
-        // Afficher le widget hCaptcha
+        L('🔒 Captcha requis — ouvre Instagram pour le résoudre !', 'w');
+        st('st-create', '🔒 Clique "Ouvrir Instagram", résous le captcha, puis reclique Créer !', 'wa');
         captchaNeeded = true;
-        const capBox = document.getElementById('cap-box');
-        capBox.classList.add('show');
-        // Render le widget si pas encore chargé
-        if (typeof hcaptcha !== 'undefined') {
-            try { hcaptcha.render('hcap', { sitekey: '13257c65-6cb7-4d3e-a1e0-f4a30e64b80c' }); } catch(e) {}
-        }
+        document.getElementById('cap-box').classList.add('show');
+        document.getElementById('cap-status').textContent = 'Ouvre Instagram, résous le captcha, reviens ici et reclique Créer.';
         document.getElementById('btnCreate').disabled = false;
         return;
     }
@@ -576,6 +558,13 @@ async function finalize(code) {
     }
 }
 
+// ── Ouvrir Instagram pour résoudre le captcha ──────────────────────────────────
+function openIgCap() {
+    window.open('https://www.instagram.com/accounts/emailsignup/', '_blank');
+    document.getElementById('cap-status').textContent = '✅ Instagram ouvert — résous le captcha là-bas, reviens ici et reclique Créer !';
+    document.getElementById('cap-status').style.color = '#16a34a';
+}
+
 // ── Redémarrer ────────────────────────────────────────────────────────────────
 async function restart() {
     document.getElementById('step-done').style.display = 'none';
@@ -584,7 +573,6 @@ async function restart() {
     document.getElementById('btnCreate').disabled = false;
     document.getElementById('cap-box').classList.remove('show');
     captchaNeeded = false;
-    if (typeof hcaptcha !== 'undefined') { try { hcaptcha.reset(); } catch(e) {} }
     randomDate();
     await loadInfos();
 }
