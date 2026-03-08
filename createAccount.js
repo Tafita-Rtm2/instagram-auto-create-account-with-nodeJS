@@ -416,62 +416,84 @@ async function handleCheckpoint(checkpointUrl, cookieStr, csrf, log) {
         const captchaPageUrl = resp.url || postUrl1;
         log('📄 Après Continuer → ' + resp.status);
 
-        // ── Étape 2 : Captcha — Audio (plus fiable) avec fallback image ──────────
-        // Chercher le lien audio "Écouter ce code"
-        const audioPatterns = [
-            /href="([^"]*audio[^"]*\.mp3[^"]*)"/i,
-            /href="([^"]*captcha[^"]*audio[^"]*)"/i,
-            /"audio_url"\s*:\s*"([^"]+)"/i,
-            /Écouter[^<]*<\/a[^>]*>.*?href="([^"]+)"/i,
-            /<a[^>]*href="([^"]+)"[^>]*>\s*[ÉE]couter/i,
-        ];
+        // ── Étape 2 : Extraire les URLs captcha depuis le JSON React ─────────────
+        // Instagram charge tout en React/JSON — les URLs sont dans des données JSON embarquées
+        
+        // Extraire tous les blocs JSON de la page
         let audioUrl = null;
-        for (const p of audioPatterns) {
-            const m = html.match(p);
-            if (m) { audioUrl = m[1].startsWith('http') ? m[1] : baseUrl + m[1]; break; }
+        let imgCaptchaUrl = null;
+
+        // Chercher dans les données JSON embarquées (format React/Instagram)
+        const jsonBlocks = html.match(/"([^"]*(?:audio|captcha|challenge)[^"]*\.(?:mp3|wav|ogg|jpg|jpeg|png)(?:[^"]{0,50})?)"/gi) || [];
+        for (const block of jsonBlocks) {
+            const url = block.replace(/"/g, '').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+            if (!url.startsWith('http')) continue;
+            if (/\.mp3|\.wav|\.ogg/i.test(url) && !audioUrl) audioUrl = url;
+            if (/\.jpg|\.jpeg|\.png/i.test(url) && !imgCaptchaUrl) imgCaptchaUrl = url;
         }
 
-        let captchaCode = '';
-
-        if (audioUrl) {
-            log('🔊 Audio captcha trouvé : ' + audioUrl.substring(0, 70));
-            captchaCode = await solveAudioCaptcha(audioUrl, cookieStr, log);
-            log('🔊 Audio OCR : "' + captchaCode + '"');
+        // Chercher l'audio via les liens "Écouter ce code"
+        if (!audioUrl) {
+            const audioPatterns = [
+                /href="([^"]*\.mp3[^"]*)"/i,
+                /"audio_url"\s*:\s*"([^"]+)"/i,
+                /href="([^"]+)"[^>]*>[^<]*[ÉE]couter/i,
+                /<a[^>]*href="([^"]+)"[^>]*>\s*[ÉE]couter/i,
+            ];
+            for (const p of audioPatterns) {
+                const m = html.match(p);
+                if (m) {
+                    const u = m[1].replace(/\\u0026/g,'&').replace(/\\\//g,'/');
+                    audioUrl = u.startsWith('http') ? u : baseUrl + u;
+                    break;
+                }
+            }
         }
 
-        // Fallback : image OCR si audio échoue ou non trouvé
-        if (!captchaCode || captchaCode.length < 4) {
-            log('🖼️ Fallback image OCR…');
-            let imgUrl = null;
+        // Chercher l'image captcha — UNIQUEMENT .jpg/.jpeg/.png, PAS .js
+        if (!imgCaptchaUrl) {
             const imgPatterns = [
-                /\\"url\\":\s*\\"(https:[^"\\]+\.(?:jpg|jpeg|png)[^"\\]*)\\"/,
-                /"url":"(https:[^"]+\.(?:jpg|jpeg|png)[^"]*)"/,
-                /src="(https:\/\/static\.cdninstagram\.com[^"]+)"/,
-                /src="(https:\/\/[^"]*\/challenge\/[^"]+\.(?:jpg|jpeg|png)[^"]*)"/,
-                /<img[^>]+src="(https?:\/\/[^"]{30,})"/,
+                /src="(https:\/\/[^"]+\.(?:jpg|jpeg|png)(?:\?[^"]{0,100})?)"/i,
+                /"url"\s*:\s*"(https:[^"]+\.(?:jpg|jpeg|png)[^"]*)"/i,
+                /\\"url\\"\s*:\s*\\"(https:[^"\\]+\.(?:jpg|jpeg|png)[^"\\]*)\\"/i,
             ];
             for (const p of imgPatterns) {
                 const m = html.match(p);
-                if (m) { imgUrl = m[1].replace(/\\u0026/g, '&').replace(/\\/g, ''); break; }
-            }
-            if (!imgUrl) {
-                const jsonMatch = html.match(/window\._sharedData\s*=\s*({.+?});<\/script>/);
-                if (jsonMatch) {
-                    const imgInJson = jsonMatch[0].match(/"url":"(https:[^"]+\.(?:jpg|jpeg|png)[^"]*)"/);
-                    if (imgInJson) imgUrl = imgInJson[1];
+                if (m) {
+                    imgCaptchaUrl = m[1].replace(/\\u0026/g,'&').replace(/\\\//g,'/');
+                    break;
                 }
-            }
-            if (imgUrl) {
-                captchaCode = await ocrImage(imgUrl, cookieStr);
-                log('🖼️ Image OCR : "' + captchaCode + '"');
-            } else {
-                log('⚠️ Ni audio ni image captcha trouvés. HTML: ' + html.substring(0, 200).replace(/<[^>]+>/g,' ').replace(/\s+/g,' '));
-                return false;
             }
         }
 
+        log('🔍 Audio: ' + (audioUrl ? audioUrl.substring(0,60) : 'non trouvé'));
+        log('🔍 Image: ' + (imgCaptchaUrl ? imgCaptchaUrl.substring(0,60) : 'non trouvée'));
+
+        let captchaCode = '';
+
+        // Priorité 1 : Audio (plus fiable)
+        if (audioUrl) {
+            log('🔊 Résolution audio captcha…');
+            captchaCode = await solveAudioCaptcha(audioUrl, cookieStr, log);
+            log('🔊 Audio résultat : "' + captchaCode + '"');
+        }
+
+        // Priorité 2 : Image OCR si audio échoue
+        if ((!captchaCode || captchaCode.length < 4) && imgCaptchaUrl) {
+            log('🖼️ Résolution image OCR…');
+            captchaCode = await ocrImage(imgCaptchaUrl, cookieStr);
+            log('🖼️ Image résultat : "' + captchaCode + '"');
+        }
+
+        // Aucun captcha trouvé — afficher HTML pour debug
         if (!captchaCode || captchaCode.length < 4) {
-            log('⚠️ Captcha illisible (audio + image)');
+            if (!audioUrl && !imgCaptchaUrl) {
+                // Logguer les premières URLs trouvées dans le HTML pour debug
+                const allUrls = (html.match(/https:\/\/[^\s"'<>]{10,80}/g) || []).slice(0,5);
+                log('⚠️ Aucun captcha trouvé. URLs page: ' + allUrls.join(' | '));
+            } else {
+                log('⚠️ Captcha illisible (OCR vide)');
+            }
             return false;
         }
         log('✅ Code captcha : ' + captchaCode);
