@@ -1,11 +1,53 @@
 const express = require('express');
 const fetch   = require('node-fetch');
+const fs      = require('fs');
 const { generatingName, username } = require('./accountInfoGenerator');
 
-const PASSWORD = 'Azerty12345!';
-const PORT     = process.env.PORT || 10000;
-const sleep    = ms => new Promise(r => setTimeout(r, ms));
-const IG_UA    = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const PASSWORD    = 'Azerty12345!';
+const PORT        = process.env.PORT || 10000;
+const sleep       = ms => new Promise(r => setTimeout(r, ms));
+const IG_UA       = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// ── Config Panel Admin (optionnel) ────────────────────────────────────────────
+// Mets l'URL de ton panel déployé ici, ex: https://mon-panel.railway.app
+const PANEL_URL  = process.env.PANEL_URL  || '';
+const LICENSE_KEY = process.env.LICENSE_KEY || loadLicenseKey();
+
+function loadLicenseKey() {
+    try { return fs.readFileSync('./license.key', 'utf8').trim(); } catch(e) { return ''; }
+}
+
+// Vérifier la licence au démarrage (si panel configuré)
+async function checkLicense() {
+    if (!PANEL_URL || !LICENSE_KEY) return true; // Pas de panel = pas de vérif
+    try {
+        const r = await fetch(PANEL_URL + '/api/license/check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: LICENSE_KEY }),
+            timeout: 8000,
+        });
+        const d = await r.json();
+        if (!d.valid) { console.log('❌ Licence invalide : ' + d.reason); process.exit(1); }
+        console.log('✅ Licence valide — Bonjour ' + d.employeeName + ' (' + d.usesLeft + ' utilisations restantes)');
+        return true;
+    } catch(e) { console.log('⚠️ Panel injoignable — mode hors ligne'); return true; }
+}
+
+// Envoyer les comptes créés au panel admin
+async function saveToPanel(accounts, log) {
+    if (!PANEL_URL || !LICENSE_KEY || accounts.length === 0) return;
+    try {
+        const r = await fetch(PANEL_URL + '/api/accounts/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ licenseKey: LICENSE_KEY, accounts }),
+            timeout: 10000,
+        });
+        const d = await r.json();
+        if (log) log('☁️ ' + (d.ok ? d.saved + ' comptes envoyés au panel' : 'Panel non joignable'));
+    } catch(e) { if (log) log('⚠️ Panel save : ' + e.message); }
+}
 
 function slog(m) { console.log(m); }
 
@@ -248,6 +290,47 @@ async function ocrImage(imgUrl, cookieStr) {
     } catch(e) { return ''; }
 }
 
+// Résoudre captcha AUDIO Instagram via Wit.ai (speech-to-text gratuit)
+async function solveAudioCaptcha(audioUrl, cookieStr, log) {
+    try {
+        // Télécharger le fichier audio MP3
+        log('🔊 Téléchargement audio…');
+        const audioResp = await fetch(audioUrl, {
+            headers: { 'User-Agent': IG_UA, 'Cookie': cookieStr, 'Referer': 'https://www.instagram.com/' },
+            timeout: 15000,
+        });
+        const audioBuf = await audioResp.buffer();
+        log('🔊 Audio ' + audioBuf.length + ' bytes — envoi Wit.ai…');
+
+        // Wit.ai speech-to-text (clé publique free tier)
+        const witResp = await fetch('https://api.wit.ai/speech?v=20230215', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer JVHFQ3R7OOVEYJBGS3XU3GXKQPLKFVBF',
+                'Content-Type': 'audio/mpeg3',
+            },
+            body: audioBuf,
+            timeout: 20000,
+        });
+        const witText = await witResp.text();
+        log('🔊 Wit.ai brut : ' + witText.substring(0, 150));
+
+        // Wit.ai retourne du JSON multilignes, prendre la dernière ligne
+        const lines = witText.trim().split('\n').filter(l => l.trim());
+        const lastLine = lines[lines.length - 1] || '{}';
+        const witData = JSON.parse(lastLine);
+        const text = (witData.text || '').replace(/\D/g, '').trim();
+        if (text) return text;
+
+        // Fallback : chercher des chiffres dans le texte brut
+        const nums = witText.match(/\d+/g);
+        return nums ? nums.join('').substring(0, 8) : '';
+    } catch(e) {
+        log('⚠️ Audio OCR : ' + e.message);
+        return '';
+    }
+}
+
 // ── Gestion checkpoint Instagram via API JSON ─────────────────────────────────
 async function handleCheckpoint(checkpointUrl, cookieStr, csrf, log) {
     try {
@@ -333,45 +416,65 @@ async function handleCheckpoint(checkpointUrl, cookieStr, csrf, log) {
         const captchaPageUrl = resp.url || postUrl1;
         log('📄 Après Continuer → ' + resp.status);
 
-        // ── Étape 2 : Captcha image — extraire l'URL de l'image ───────────────
-        // Instagram encode l'image dans un tag <img> avec src dynamique
-        // Chercher tous les patterns possibles
-        let imgUrl = null;
-        const imgPatterns = [
-            /\\"url\\":\s*\\"(https:[^"\\]+\.(?:jpg|jpeg|png)[^"\\]*)\\"/,  // JSON encodé dans HTML
-            /"url":"(https:[^"]+\.(?:jpg|jpeg|png)[^"]*)"/,                  // JSON normal
-            /src="(https:\/\/static\.cdninstagram\.com[^"]+)"/,              // CDN Instagram
-            /src="(https:\/\/[^"]*\/challenge\/[^"]+\.(?:jpg|jpeg|png)[^"]*)"/,
-            /<img[^>]+src="(https?:\/\/[^"]{30,})"/,                         // Image longue URL
+        // ── Étape 2 : Captcha — Audio (plus fiable) avec fallback image ──────────
+        // Chercher le lien audio "Écouter ce code"
+        const audioPatterns = [
+            /href="([^"]*audio[^"]*\.mp3[^"]*)"/i,
+            /href="([^"]*captcha[^"]*audio[^"]*)"/i,
+            /"audio_url"\s*:\s*"([^"]+)"/i,
+            /Écouter[^<]*<\/a[^>]*>.*?href="([^"]+)"/i,
+            /<a[^>]*href="([^"]+)"[^>]*>\s*[ÉE]couter/i,
         ];
-        for (const p of imgPatterns) {
+        let audioUrl = null;
+        for (const p of audioPatterns) {
             const m = html.match(p);
-            if (m) { imgUrl = m[1].replace(/\\u0026/g, '&').replace(/\\/g, ''); break; }
+            if (m) { audioUrl = m[1].startsWith('http') ? m[1] : baseUrl + m[1]; break; }
         }
 
-        if (!imgUrl) {
-            // Chercher dans les données JSON embarquées dans le HTML
-            const jsonMatch = html.match(/\{"require":\[\["ChallengeFlow[^}]+\}/)
-                           || html.match(/window\._sharedData\s*=\s*({.+?});<\/script>/);
-            if (jsonMatch) {
-                const imgInJson = jsonMatch[0].match(/"url":"(https:[^"]+\.(?:jpg|jpeg|png)[^"]*)"/);
-                if (imgInJson) imgUrl = imgInJson[1];
+        let captchaCode = '';
+
+        if (audioUrl) {
+            log('🔊 Audio captcha trouvé : ' + audioUrl.substring(0, 70));
+            captchaCode = await solveAudioCaptcha(audioUrl, cookieStr, log);
+            log('🔊 Audio OCR : "' + captchaCode + '"');
+        }
+
+        // Fallback : image OCR si audio échoue ou non trouvé
+        if (!captchaCode || captchaCode.length < 4) {
+            log('🖼️ Fallback image OCR…');
+            let imgUrl = null;
+            const imgPatterns = [
+                /\\"url\\":\s*\\"(https:[^"\\]+\.(?:jpg|jpeg|png)[^"\\]*)\\"/,
+                /"url":"(https:[^"]+\.(?:jpg|jpeg|png)[^"]*)"/,
+                /src="(https:\/\/static\.cdninstagram\.com[^"]+)"/,
+                /src="(https:\/\/[^"]*\/challenge\/[^"]+\.(?:jpg|jpeg|png)[^"]*)"/,
+                /<img[^>]+src="(https?:\/\/[^"]{30,})"/,
+            ];
+            for (const p of imgPatterns) {
+                const m = html.match(p);
+                if (m) { imgUrl = m[1].replace(/\\u0026/g, '&').replace(/\\/g, ''); break; }
+            }
+            if (!imgUrl) {
+                const jsonMatch = html.match(/window\._sharedData\s*=\s*({.+?});<\/script>/);
+                if (jsonMatch) {
+                    const imgInJson = jsonMatch[0].match(/"url":"(https:[^"]+\.(?:jpg|jpeg|png)[^"]*)"/);
+                    if (imgInJson) imgUrl = imgInJson[1];
+                }
+            }
+            if (imgUrl) {
+                captchaCode = await ocrImage(imgUrl, cookieStr);
+                log('🖼️ Image OCR : "' + captchaCode + '"');
+            } else {
+                log('⚠️ Ni audio ni image captcha trouvés. HTML: ' + html.substring(0, 200).replace(/<[^>]+>/g,' ').replace(/\s+/g,' '));
+                return false;
             }
         }
 
-        if (!imgUrl) {
-            log('⚠️ Image captcha introuvable — HTML snippet: ' + html.substring(0, 300).replace(/<[^>]+>/g,' ').replace(/\s+/g,' '));
-            return false;
-        }
-
-        log('🖼️ Image captcha : ' + imgUrl.substring(0, 80));
-        const captchaCode = await ocrImage(imgUrl, cookieStr);
-        log('🔢 OCR : "' + captchaCode + '"');
-
         if (!captchaCode || captchaCode.length < 4) {
-            log('⚠️ OCR vide ou trop court');
+            log('⚠️ Captcha illisible (audio + image)');
             return false;
         }
+        log('✅ Code captcha : ' + captchaCode);
 
         // ── Soumettre le captcha ───────────────────────────────────────────────
         const jazoest2 = (html.match(/name="jazoest"\s+value="([^"]+)"/) || [])[1] || '';
@@ -649,7 +752,13 @@ app.post('/api/create-bulk', async (req, res) => {
     });
     await Promise.all(workers);
     sessions[sessionId].running = false;
-    slog('✅ Session ' + sessionId + ' terminée : ' + sessions[sessionId].accounts.filter(a=>a.success).length + '/' + count + ' succès');
+    const successAccounts = sessions[sessionId].accounts.filter(a => a.success);
+    slog('✅ Session ' + sessionId + ' terminée : ' + successAccounts.length + '/' + count + ' succès');
+
+    // ── Envoyer les comptes créés au panel admin ──────────────────────────────
+    if (successAccounts.length > 0) {
+        await saveToPanel(successAccounts, (m) => sessions[sessionId].logs.push(m));
+    }
 });
 
 app.get('/api/session/:id', (req, res) => {
@@ -903,5 +1012,6 @@ checkTor();
 app.listen(PORT, '0.0.0.0', () => slog('🌐 Port ' + PORT));
 (async () => {
     slog('🤖 Bot Instagram prêt sur le port ' + PORT);
+    await checkLicense();
     await checkTor();
 })();
