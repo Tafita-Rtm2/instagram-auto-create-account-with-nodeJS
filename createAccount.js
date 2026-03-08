@@ -214,6 +214,131 @@ async function getCSRFData() {
     };
 }
 
+// ── Gestion checkpoint Instagram (suspension / vérification) ─────────────────
+async function handleCheckpoint(checkpointUrl, cookieStr, csrf, log) {
+    try {
+        log('🔒 Checkpoint : ' + checkpointUrl);
+        const fullUrl = checkpointUrl.startsWith('http') ? checkpointUrl : 'https://www.instagram.com' + checkpointUrl;
+
+        // Charger la page checkpoint
+        const page = await makeFetch(fullUrl, {
+            headers: { 'User-Agent': IG_UA, 'Cookie': cookieStr, 'Accept': 'text/html,*/*' },
+            redirect: 'follow'
+        });
+        const html = await page.text();
+
+        // Mettre à jour cookies
+        const newCookies = {};
+        for (const c of (page.headers.raw()['set-cookie'] || [])) {
+            const p = c.split(';')[0].trim(), i = p.indexOf('=');
+            if (i > 0) newCookies[p.substring(0,i).trim()] = p.substring(i+1).trim();
+        }
+        const ex = {};
+        for (const p of cookieStr.split(';')) { const i = p.indexOf('='); if (i > 0) ex[p.substring(0,i).trim()] = p.substring(i+1).trim(); }
+        Object.assign(ex, newCookies);
+        cookieStr = Object.entries(ex).map(e => e[0]+'='+e[1]).join('; ');
+        if (newCookies.csrftoken) csrf = newCookies.csrftoken;
+
+        // Chercher type de challenge
+        const isCaptcha = html.includes('captcha') || html.includes('Saisissez le code') || html.includes('personne réelle');
+        const isPhone   = html.includes('phone') || html.includes('téléphone') || html.includes('mobile');
+
+        if (isCaptcha) {
+            log('🔢 Captcha image détecté — tentative OCR…');
+            // Extraire l'image captcha
+            const imgMatch = html.match(/src="([^"]*captcha[^"]*\.(?:jpg|png|gif)[^"]*)"/i)
+                           || html.match(/<img[^>]*src="([^"]+)"[^>]*>/i);
+
+            if (imgMatch) {
+                const imgUrl = imgMatch[1].startsWith('http') ? imgMatch[1] : 'https://www.instagram.com' + imgMatch[1];
+                log('🖼️ Image captcha : ' + imgUrl.substring(0, 60));
+                // OCR via api.ocr.space (gratuit)
+                try {
+                    const imgResp = await fetch(imgUrl, { headers: { 'User-Agent': IG_UA }, timeout: 10000 });
+                    const imgBuf = await imgResp.buffer();
+                    const b64 = imgBuf.toString('base64');
+                    const ocrResp = await fetch('https://api.ocr.space/parse/image', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'apikey=K81885106588957&base64Image=data:image/jpeg;base64,' + b64 + '&OCREngine=2&isNumeric=true',
+                        timeout: 15000,
+                    });
+                    const ocrData = await ocrResp.json();
+                    const text = (ocrData.ParsedResults?.[0]?.ParsedText || '').replace(/\D/g, '').trim();
+                    log('🔢 OCR résultat : "' + text + '"');
+                    if (text && text.length >= 4) {
+                        // Trouver le token et action du formulaire
+                        const tokenMatch = html.match(/name="csrfmiddlewaretoken"\s+value="([^"]+)"/);
+                        const jazoestMatch = html.match(/name="jazoest"\s+value="([^"]+)"/);
+                        const formCsrf = tokenMatch ? tokenMatch[1] : csrf;
+
+                        const submitBody = enc({
+                            csrfmiddlewaretoken: formCsrf,
+                            jazoest: jazoestMatch ? jazoestMatch[1] : '',
+                            'captcha_response': text,
+                        });
+                        const submitResp = await makeFetch(fullUrl, {
+                            method: 'POST',
+                            headers: {
+                                'User-Agent': IG_UA, 'Cookie': cookieStr,
+                                'Content-Type': 'application/x-www-form-urlencoded',
+                                'Referer': fullUrl, 'Origin': 'https://www.instagram.com',
+                                'X-CSRFToken': formCsrf,
+                            },
+                            body: submitBody, redirect: 'follow', timeout: 15000,
+                        });
+                        log('🔢 Captcha soumis : ' + submitResp.status);
+                        return submitResp.status < 400;
+                    }
+                } catch(e) { log('⚠️ OCR : ' + e.message); }
+            }
+        }
+
+        if (isPhone) {
+            log('📱 Checkpoint téléphone — recherche numéro…');
+            const phoneData = await getFreePhone();
+            log('📱 Numéro : ' + phoneData.number);
+            // Envoyer numéro
+            const tokenMatch = html.match(/name="csrfmiddlewaretoken"\s+value="([^"]+)"/);
+            const formCsrf = tokenMatch ? tokenMatch[1] : csrf;
+            const sendResp = await makeFetch(fullUrl, {
+                method: 'POST',
+                headers: {
+                    'User-Agent': IG_UA, 'Cookie': cookieStr,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Referer': fullUrl, 'Origin': 'https://www.instagram.com',
+                    'X-CSRFToken': formCsrf,
+                },
+                body: enc({ csrfmiddlewaretoken: formCsrf, phone_number: phoneData.number }),
+                redirect: 'follow', timeout: 15000,
+            });
+            log('📱 Envoi numéro : ' + sendResp.status);
+            await sleep(5000);
+            const smsCode = await readSmsCode(phoneData.number);
+            if (smsCode) {
+                log('✅ Code SMS : ' + smsCode);
+                const verResp = await makeFetch(fullUrl, {
+                    method: 'POST',
+                    headers: {
+                        'User-Agent': IG_UA, 'Cookie': cookieStr,
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Referer': fullUrl, 'Origin': 'https://www.instagram.com',
+                        'X-CSRFToken': formCsrf,
+                    },
+                    body: enc({ csrfmiddlewaretoken: formCsrf, response_code: smsCode }),
+                    redirect: 'follow', timeout: 15000,
+                });
+                log('📱 Vérif SMS : ' + verResp.status);
+                return verResp.status < 400;
+            } else {
+                log('⚠️ Code SMS non reçu');
+            }
+        }
+
+        return false;
+    } catch(e) { log('⚠️ Checkpoint : ' + e.message); return false; }
+}
+
 // ── Création d'UN compte (fonction réutilisable) ──────────────────────────────
 async function createOneAccount(log) {
     const result = { success: false, email:'', password: PASSWORD, uName:'', fullName:'', confirmed: false, photo: false, error: '' };
@@ -310,8 +435,15 @@ async function createOneAccount(log) {
     log('🎉 Compte créé @' + result.uName + ' !');
     result.success = true;
 
-    // Vérification téléphone si demandée
-    if (final.checkpoint_url || final.phone_number_required) {
+    // Checkpoint (suspension / vérification identité)
+    if (final.checkpoint_url) {
+        log('🔒 Checkpoint détecté — tentative résolution auto…');
+        const resolved = await handleCheckpoint(final.checkpoint_url, cookieStr, csrf, log);
+        log(resolved ? '✅ Checkpoint résolu !' : '⚠️ Checkpoint non résolu — compte peut nécessiter vérification manuelle');
+    }
+
+    // Vérification téléphone API si demandée (sans checkpoint)
+    if (!final.checkpoint_url && (final.phone_number_required)) {
         log('📱 Téléphone requis — recherche numéro…');
         try {
             const phoneData = await getFreePhone();
