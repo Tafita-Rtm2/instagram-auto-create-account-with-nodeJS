@@ -95,24 +95,122 @@ async function renewTorIp() {
     });
 }
 
-// ── Email temporaire ──────────────────────────────────────────────────────────
-async function getFakeMail() {
-    try {
+// ── Email temporaire — Multi-services rotation ───────────────────────────────
+const EMAIL_SERVICES = [
+    // Service 1 : doux.gleeze.com (actuel)
+    async () => {
         const r = await fetch('https://doux.gleeze.com/tempmail/gen', { timeout: 10000 });
         const d = await r.json();
-        if (d && d.email && d.token) return { email: d.email, token: d.token };
-    } catch(e) {}
+        if (d?.email && d?.token) return { email: d.email, token: d.token, service: 'gleeze' };
+        throw new Error('gleeze failed');
+    },
+    // Service 2 : Guerrilla Mail
+    async () => {
+        const r = await fetch('https://api.guerrillamail.com/ajax.php?f=get_email_address', { timeout: 10000 });
+        const d = await r.json();
+        if (d?.email_addr) return { email: d.email_addr, token: d.sid_token, service: 'guerrilla' };
+        throw new Error('guerrilla failed');
+    },
+    // Service 3 : mail.tm
+    async () => {
+        // Créer un compte mail.tm
+        const domain_r = await fetch('https://api.mail.tm/domains', { timeout: 8000 });
+        const domains = await domain_r.json();
+        const domain = domains['hydra:member']?.[0]?.domain || 'dcctb.com';
+        const rand = 'user' + Math.random().toString(36).slice(2,10);
+        const pass = 'Pass' + Math.random().toString(36).slice(2,10) + '!';
+        const email = rand + '@' + domain;
+        const reg = await fetch('https://api.mail.tm/accounts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address: email, password: pass }),
+            timeout: 10000,
+        });
+        if (!reg.ok) throw new Error('mail.tm register failed');
+        const tok_r = await fetch('https://api.mail.tm/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address: email, password: pass }),
+            timeout: 10000,
+        });
+        const tok = await tok_r.json();
+        if (!tok.token) throw new Error('mail.tm token failed');
+        return { email, token: tok.token, service: 'mailtm', mailtm_pass: pass };
+    },
+];
+
+let emailServiceIndex = 0;
+
+async function getFakeMail() {
+    // Essayer chaque service en rotation
+    for (let i = 0; i < EMAIL_SERVICES.length; i++) {
+        const idx = (emailServiceIndex + i) % EMAIL_SERVICES.length;
+        try {
+            const result = await EMAIL_SERVICES[idx]();
+            emailServiceIndex = (idx + 1) % EMAIL_SERVICES.length; // rotation
+            return result;
+        } catch(e) {}
+    }
+    // Fallback absolu
     const rand = Math.floor(Math.random() * 99999);
-    return { email: 'user' + rand + '@guerrillamail.com', token: '' };
+    return { email: 'user' + rand + '@guerrillamail.com', token: '', service: 'fallback' };
 }
 
-// ── Poll email ────────────────────────────────────────────────────────────────
-async function pollEmailCode(token) {
+// ── Poll email — Multi-services ───────────────────────────────────────────────
+async function pollEmailCode(token, service) {
+    // mail.tm
+    if (service === 'mailtm') {
+        for (let i = 0; i < 3; i++) {
+            try {
+                const r = await fetch('https://api.mail.tm/messages', {
+                    headers: { 'Authorization': 'Bearer ' + token },
+                    timeout: 8000,
+                });
+                const d = await r.json();
+                for (const msg of (d['hydra:member'] || [])) {
+                    const intro = (msg.subject || '') + ' ' + (msg.intro || '');
+                    const m = intro.match(/\b(\d{6})\b/);
+                    if (m) return m[1];
+                    // Lire le message complet si intro n'a pas le code
+                    try {
+                        const mr = await fetch('https://api.mail.tm/messages/' + msg.id, {
+                            headers: { 'Authorization': 'Bearer ' + token }, timeout: 8000,
+                        });
+                        const md = await mr.json();
+                        const body = (md.text || '') + ' ' + (md.html || '');
+                        const mc = body.match(/\b(\d{6})\b/);
+                        if (mc) return mc[1];
+                    } catch(e) {}
+                }
+            } catch(e) {}
+            if (i < 2) await sleep(1000);
+        }
+        return null;
+    }
+
+    // Guerrilla Mail
+    if (service === 'guerrilla') {
+        for (let i = 0; i < 3; i++) {
+            try {
+                const r = await fetch('https://api.guerrillamail.com/ajax.php?f=check_email&seq=0&sid_token=' + encodeURIComponent(token), { timeout: 8000 });
+                const d = await r.json();
+                for (const msg of (d.list || [])) {
+                    const txt = (msg.mail_subject || '') + ' ' + (msg.mail_excerpt || '');
+                    const m = txt.match(/\b(\d{6})\b/);
+                    if (m) return m[1];
+                }
+            } catch(e) {}
+            if (i < 2) await sleep(1000);
+        }
+        return null;
+    }
+
+    // gleeze (défaut)
     for (let i = 0; i < 3; i++) {
         try {
             const r = await fetch('https://doux.gleeze.com/tempmail/inbox?token=' + encodeURIComponent(token), { timeout: 8000 });
             const d = await r.json();
-            if (d.answer && d.answer.length > 0) {
+            if (d.answer?.length > 0) {
                 for (let m of d.answer) {
                     const txt = (m.subject || '') + ' ' + (m.intro || '');
                     const match = txt.match(/\b(\d{6})\b/);
@@ -615,12 +713,13 @@ async function createOneAccount(log) {
 
     // Infos
     const mailData = await getFakeMail();
-    result.email    = mailData.email;
-    result.fullName = generatingName();
-    result.uName    = username();
-    const token     = mailData.token;
+    result.email       = mailData.email;
+    result.emailService = mailData.service || 'gleeze';
+    result.fullName    = generatingName();
+    result.uName       = username();
+    const token        = mailData.token;
 
-    log('📧 ' + result.email + ' | @' + result.uName);
+    log('📧 ' + result.email + ' [' + result.emailService + '] | @' + result.uName);
 
     // CSRF
     let csrf = '', mid = '', cookieStr = '';
@@ -687,11 +786,11 @@ async function createOneAccount(log) {
     log('✅ Email envoyé !');
 
     // Étape 3 : attendre code email
-    log('📬 Attente code email…');
+    log('📬 Attente code email [' + (result.emailService||'?') + ']…');
     let code = null;
     for (let tries = 0; tries < 24 && !code; tries++) {
         await sleep(5000);
-        if (token) code = await pollEmailCode(token);
+        if (token) code = await pollEmailCode(token, result.emailService);
         log('📬 Tentative ' + (tries+1) + (code ? ' → '+code : '…'));
     }
     if (!code) { result.error = 'code_not_received'; return result; }
@@ -756,6 +855,43 @@ async function createOneAccount(log) {
     const photoOk = await setProfilePhoto(cookieStr, csrf);
     result.photo = photoOk;
     log(photoOk ? '🖼️ Photo ajoutée !' : '⚠️ Photo non ajoutée');
+
+    // ── Auto-login : sauvegarder session cookies ───────────────────────────────
+    try {
+        // Vérifier que la session est valide via l'API
+        const meResp = await makeFetch('https://www.instagram.com/api/v1/accounts/current_user/?edit=true', {
+            headers: { 'User-Agent': IG_UA, 'Cookie': cookieStr, 'X-CSRFToken': csrf, 'X-Requested-With': 'XMLHttpRequest' },
+            timeout: 10000,
+        });
+        const meData = await meResp.json().catch(() => ({}));
+        if (meData.user || meData.status === 'ok') {
+            result.loggedIn = true;
+            result.sessionCookies = cookieStr;
+            result.sessionCsrf = csrf;
+            log('🔑 Session active ! Compte connecté.');
+        } else {
+            // Tenter un login explicite
+            const loginResp = await makeFetch('https://www.instagram.com/accounts/login/ajax/', {
+                method: 'POST',
+                headers: {
+                    ...IG_HEADERS(csrf, cookieStr, 'https://www.instagram.com/'),
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: enc({ username: result.uName, enc_password: '#PWD_INSTAGRAM_BROWSER:0:'+Math.floor(Date.now()/1000)+':'+PASSWORD, optIntoOneTap: 'false' }),
+                timeout: 15000,
+            });
+            const loginData = await loginResp.json().catch(() => ({}));
+            if (loginData.authenticated) {
+                cookieStr = mergeCookies(cookieStr, loginResp.headers.raw()['set-cookie']);
+                result.loggedIn = true;
+                result.sessionCookies = cookieStr;
+                result.sessionCsrf = csrf;
+                log('🔑 Login automatique réussi !');
+            } else {
+                log('⚠️ Login auto : ' + JSON.stringify(loginData).substring(0,60));
+            }
+        }
+    } catch(e) { log('⚠️ Login auto : ' + e.message); }
 
     return result;
 }
@@ -1009,16 +1145,18 @@ function renderAccount(acc) {
     div.className = 'acc-card ' + (acc.success ? 'acc-ok' : 'acc-err');
     if (acc.success) {
         div.innerHTML = \`
-            <div style="font-weight:bold;color:#16a34a;margin-bottom:6px">
+            <div style="font-weight:bold;color:#16a34a;margin-bottom:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
                 ✅ Compte #\${acc.index}
-                \${acc.checkpointResolved === true ? '<span class="badge b-ok">Actif ✓</span>' : acc.checkpointResolved === false ? '<span class="badge b-warn">Suspendu?</span>' : ''}
-                \${acc.confirmed ? '<span class="badge b-ok">Email ✓</span>' : '<span class="badge b-warn">Email ?</span>'}
+                \${acc.checkpointResolved === true ? '<span class="badge b-ok">Actif ✓</span>' : '<span class="badge b-warn">Suspendu?</span>'}
                 \${acc.photo ? '<span class="badge b-ok">Photo ✓</span>' : ''}
+                \${acc.loggedIn ? '<span class="badge" style="background:#dbeafe;color:#1d4ed8">🔑 Connecté</span>' : ''}
+                <span class="badge" style="background:#f3e8ff;color:#7c3aed">\${acc.emailService || 'email'}</span>
             </div>
             <div class="acc-row"><span class="acc-lbl">📧 Email</span><span class="acc-val">\${acc.email}<button class="copy-btn" onclick="copy('\${acc.email}')">Copier</button></span></div>
-            <div class="acc-row"><span class="acc-lbl">🔒 Pass</span><span class="acc-val">\${acc.password}</span></div>
-            <div class="acc-row"><span class="acc-lbl">👤 User</span><span class="acc-val">@\${acc.uName}</span></div>
+            <div class="acc-row"><span class="acc-lbl">🔒 Pass</span><span class="acc-val">\${acc.password}<button class="copy-btn" onclick="copy('\${acc.password}')">Copier</button></span></div>
+            <div class="acc-row"><span class="acc-lbl">👤 User</span><span class="acc-val">@\${acc.uName}<button class="copy-btn" onclick="copy('\${acc.uName}')">Copier</button></span></div>
             <div class="acc-row"><span class="acc-lbl">🏷️ Nom</span><span class="acc-val">\${acc.fullName}</span></div>
+            \${acc.sessionCookies ? \`<div class="acc-row"><span class="acc-lbl">🍪 Cookies</span><span class="acc-val" style="font-size:10px;max-height:40px;overflow:hidden">\${acc.sessionCookies.substring(0,80)}…<button class="copy-btn" onclick="copy('\${acc.sessionCookies.replace(/'/g,'\\\\\'')}")">Copier</button></span></div>\` : ''}
         \`;
     } else {
         div.innerHTML = \`
