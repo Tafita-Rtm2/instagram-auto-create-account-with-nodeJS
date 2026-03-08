@@ -1,15 +1,12 @@
 {
-  "name": "create-instagram-account",
-  "version": "1.0.0",
-  "description": "Instagram Bot on Render",
+  "name": "instagram-bot",
+  "version": "2.0.0",
   "main": "createAccount.js",
-  "scripts": {
-    "start": "node createAccount.js"
-  },
-  "author": "Alan H",
-  "license": "ISC",
+  "scripts": { "start": "node createAccount.js" },
   "dependencies": {
     "express": "^4.18.2",
-    "node-fetch": "^2.6.1"
+    "node-fetch": "^2.6.1",
+    "lodash": "^4.17.21",
+    "socks-proxy-agent": "^8.0.2"
   }
 }
