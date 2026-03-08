@@ -338,83 +338,104 @@ async function handleCheckpoint(checkpointUrl, cookieStr, csrf, log) {
         let currentUrl = checkpointUrl.startsWith('http') ? checkpointUrl : baseUrl + checkpointUrl;
         log('🔒 Checkpoint : ' + currentUrl.substring(0, 80));
 
-        // ── Charger le checkpoint via API JSON ────────────────────────────────
-        const apiUrl = currentUrl.replace('/accounts/suspended/', '/api/v1/challenge/').replace(/\?.*/, '') + '?guid=' + mid_global;
+        const mobileUA = 'Mozilla/5.0 (Linux; Android 12; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+
+        // ── Récupérer la vraie URL challenge depuis l'API Instagram ──────────
+        // L'URL /accounts/suspended/ n'est pas la vraie page challenge
+        // On doit récupérer l'URL /challenge/action/<token>/ via l'API
+        log('📡 Récupération URL challenge réelle…');
         
-        // Approche 1 : API challenge JSON
-        log('📡 Challenge API…');
-        const apiResp = await makeFetch('https://i.instagram.com/api/v1/challenge/', {
+        // Essayer de récupérer le challenge depuis l'API web
+        const challengeApiResp = await makeFetch('https://www.instagram.com/api/v1/web/accounts/login/ajax/checkpoint/trusted_notification/', {
             method: 'POST',
             headers: {
-                'User-Agent': 'Instagram 195.0.0.31.123 Android',
+                'User-Agent': mobileUA,
                 'X-CSRFToken': csrf,
                 'Cookie': cookieStr,
                 'Content-Type': 'application/x-www-form-urlencoded',
-                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': 'https://www.instagram.com/',
             },
-            body: enc({ choice: 0, _uuid: require('crypto').randomUUID(), _uid: '' }),
-            timeout: 15000,
-            redirect: 'follow',
+            body: enc({ choice: 0 }),
+            timeout: 10000, redirect: 'follow',
         });
-        const apiData = await apiResp.json().catch(() => ({}));
-        log('📡 Challenge API → ' + JSON.stringify(apiData).substring(0, 100));
+        const challengeApiData = await challengeApiResp.json().catch(() => ({}));
+        log('📡 Challenge API2 → ' + JSON.stringify(challengeApiData).substring(0, 120));
 
-        // Si l'API retourne un challenge avec image captcha
-        if (apiData.challenge_type === 'RecaptchaChallenge' || apiData.step_name === 'verify_captcha') {
-            log('🔢 Captcha via API…');
-            // L'image est dans apiData
+        // Chercher l'URL challenge dans la réponse
+        let challengeUrl = challengeApiData.checkpoint_url
+                        || challengeApiData.challenge?.url
+                        || null;
+
+        // Si pas trouvé, charger la page suspended pour trouver le lien challenge
+        if (!challengeUrl) {
+            log('🔍 Recherche URL challenge dans la page suspended…');
+            const suspResp = await makeFetch('https://www.instagram.com/accounts/suspended/', {
+                headers: { 'User-Agent': mobileUA, 'Cookie': cookieStr, 'Accept': 'text/html,*/*' },
+                redirect: 'follow', timeout: 10000,
+            });
+            cookieStr = mergeCookies(cookieStr, suspResp.headers.raw()['set-cookie']);
+            const suspHtml = await suspResp.text();
+            csrf = extractCsrf(suspHtml, csrf);
+
+            // Chercher le lien vers /challenge/ dans le HTML
+            const challengeMatch = suspHtml.match(/href="(\/challenge\/action\/[^"]+)"/)
+                                || suspHtml.match(/href="(https:\/\/www\.instagram\.com\/challenge\/[^"]+)"/)
+                                || suspHtml.match(/"challenge_url"\s*:\s*"([^"]+)"/)
+                                || suspHtml.match(/action="(\/challenge\/[^"]+)"/);
+            if (challengeMatch) {
+                challengeUrl = challengeMatch[1].startsWith('http') ? challengeMatch[1] : baseUrl + challengeMatch[1];
+                log('✅ URL challenge trouvée : ' + challengeUrl.substring(0, 80));
+            }
         }
 
-        // ── Approche 2 : Simuler les étapes via l'URL /challenge/ ─────────────
-        // Extraire l'ID du challenge depuis l'URL
-        const challengeMatch = currentUrl.match(/\/challenge\/([^/?]+)/) ||
-                               currentUrl.match(/suspended.*?next=([^&]+)/);
+        // Utiliser l'URL challenge ou rester sur suspended
+        if (challengeUrl) {
+            currentUrl = challengeUrl.startsWith('http') ? challengeUrl : baseUrl + challengeUrl;
+        }
 
-        // Charger la page avec les bons headers mobile
-        const mobileUA = 'Mozilla/5.0 (Linux; Android 12; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 Instagram/195.0.0.31.123';
-        
-        log('📄 Chargement checkpoint mobile…');
+        // ── Charger la vraie page challenge ───────────────────────────────────
+        log('📄 Chargement page challenge : ' + currentUrl.substring(0, 80));
         let resp = await makeFetch(currentUrl, {
             headers: {
                 'User-Agent': mobileUA,
                 'Cookie': cookieStr,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
+                'Accept': 'text/html,application/xhtml+xml,*/*',
+                'Accept-Language': 'fr-FR,fr;q=0.9',
             },
             redirect: 'follow', timeout: 15000,
         });
         cookieStr = mergeCookies(cookieStr, resp.headers.raw()['set-cookie']);
         let html = await resp.text();
         csrf = extractCsrf(html, csrf);
-        const finalUrl = resp.url || currentUrl;
-        log('📄 Page chargée → ' + resp.status + ' url:' + finalUrl.substring(0, 60));
+        const pageUrl = resp.url || currentUrl;
+        log('📄 Page → ' + resp.status + ' | ' + pageUrl.substring(0, 70));
 
-        // ── Étape 1 : Clic "Continuer" ────────────────────────────────────────
-        const jazoest1 = (html.match(/name="jazoest"\s+value="([^"]+)"/) || [])[1] || '';
-        const choice1  = (html.match(/name="choice"\s+value="([^"]+)"/)  || [])[1] || '0';
-        const action1  = (html.match(/<form[^>]+action="([^"]+)"/) || [])[1] || finalUrl;
-        const postUrl1 = action1.startsWith('http') ? action1 : baseUrl + action1;
+        // ── Clic "Continuer" si la page le demande ────────────────────────────
+        const needsContinue = html.includes('Continuer') || html.includes('Continue') || html.includes('personne réelle');
+        if (needsContinue) {
+            log('📄 Clic Continuer…');
+            const jazoest1 = (html.match(/name="jazoest"\s+value="([^"]+)"/) || [])[1] || '';
+            const action1  = (html.match(/<form[^>]+action="([^"]+)"/) || [])[1] || pageUrl;
+            const postUrl1 = action1.startsWith('http') ? action1 : baseUrl + action1;
 
-        log('📄 Clic Continuer → ' + postUrl1.substring(0, 60));
-        resp = await makeFetch(postUrl1, {
-            method: 'POST',
-            headers: {
-                'User-Agent': mobileUA, 'Cookie': cookieStr,
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Referer': finalUrl, 'Origin': baseUrl,
-                'X-CSRFToken': csrf, 'Accept': 'text/html,*/*',
-            },
-            body: enc({ csrfmiddlewaretoken: csrf, jazoest: jazoest1, choice: choice1 }),
-            redirect: 'follow', timeout: 15000,
-        });
-        cookieStr = mergeCookies(cookieStr, resp.headers.raw()['set-cookie']);
-        html = await resp.text();
-        csrf = extractCsrf(html, csrf);
-        const captchaPageUrl = resp.url || postUrl1;
-        log('📄 Après Continuer → ' + resp.status);
+            resp = await makeFetch(postUrl1, {
+                method: 'POST',
+                headers: {
+                    'User-Agent': mobileUA, 'Cookie': cookieStr,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Referer': pageUrl, 'Origin': baseUrl, 'X-CSRFToken': csrf,
+                },
+                body: enc({ csrfmiddlewaretoken: csrf, jazoest: jazoest1, choice: '0' }),
+                redirect: 'follow', timeout: 15000,
+            });
+            cookieStr = mergeCookies(cookieStr, resp.headers.raw()['set-cookie']);
+            html = await resp.text();
+            csrf = extractCsrf(html, csrf);
+            const newUrl = resp.url || postUrl1;
+            log('📄 Après Continuer → ' + resp.status + ' | ' + newUrl.substring(0, 70));
+            currentUrl = newUrl;
+        }
 
         // ── Étape 2 : Extraire les URLs captcha depuis le JSON React ─────────────
         // Instagram charge tout en React/JSON — les URLs sont dans des données JSON embarquées
@@ -496,6 +517,7 @@ async function handleCheckpoint(checkpointUrl, cookieStr, csrf, log) {
             }
             return false;
         }
+        const captchaPageUrl = currentUrl;
         log('✅ Code captcha : ' + captchaCode);
 
         // ── Soumettre le captcha ───────────────────────────────────────────────
