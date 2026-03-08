@@ -50,6 +50,49 @@ app.get('/api/poll-code', async (req, res) => {
     res.json({ code: null });
 });
 
+// ── Confirmation email automatique (clic du lien Instagram) ───────────────────
+app.get('/api/confirm-email', async (req, res) => {
+    const token = req.query.token || state.token;
+    if (!token) return res.json({ confirmed: false, error: 'pas de token' });
+
+    slog('📬 Recherche lien de confirmation…');
+    for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+            const r = await fetch('https://doux.gleeze.com/tempmail/inbox?token=' + encodeURIComponent(token), { timeout: 8000 });
+            const d = await r.json();
+            if (d.answer && d.answer.length > 0) {
+                for (let m of d.answer) {
+                    // Chercher le lien Instagram de confirmation dans intro ou body
+                    const txt = (m.subject || '') + ' ' + (m.intro || '') + ' ' + (m.body || '');
+                    // Liens possibles : /confirm_email/ ou /verify_email/ ou confirmation_link
+                    const linkMatch = txt.match(/https?:\/\/[^\s"'<>]+instagram\.com[^\s"'<>]*(confirm|verif|email)[^\s"'<>]*/i)
+                                   || txt.match(/https?:\/\/[^\s"'<>]*instagram[^\s"'<>]+/i);
+                    if (linkMatch) {
+                        const link = linkMatch[0].replace(/&amp;/g, '&').split('"')[0].split("'")[0].split('<')[0];
+                        slog('🔗 Lien trouvé : ' + link.substring(0, 80) + '…');
+                        // Suivre le lien automatiquement
+                        try {
+                            const cr = await fetch(link, {
+                                headers: { 'User-Agent': IG_UA, 'Accept': 'text/html,*/*', 'Accept-Language': 'en-US,en;q=0.9' },
+                                redirect: 'follow',
+                                timeout: 15000,
+                            });
+                            slog('✅ Confirmation : ' + cr.status);
+                            return res.json({ confirmed: true, status: cr.status, link: link.substring(0, 100) });
+                        } catch(e) {
+                            slog('⚠️ Erreur clic lien : ' + e.message);
+                            return res.json({ confirmed: false, error: e.message, link: link.substring(0, 100) });
+                        }
+                    }
+                }
+            }
+        } catch(e) {}
+        if (attempt < 9) await sleep(3000);
+    }
+    slog('❌ Lien de confirmation non trouvé dans les emails');
+    res.json({ confirmed: false, error: 'lien non trouvé' });
+});
+
 // ── Proxy Instagram ────────────────────────────────────────────────────────────
 const IG_HEADERS = (csrf, cookieStr, referer, clientIp) => ({
     'User-Agent'      : IG_UA,
@@ -226,6 +269,7 @@ app.get('/', (req, res) => {
         <div class="row"><span class="lbl">🔒 Pass</span><span class="val" id="r-pass"></span></div>
         <div class="row"><span class="lbl">👤 User</span><span class="val" id="r-user"></span></div>
         <div class="row"><span class="lbl">🏷️ Nom</span><span class="val" id="r-name"></span></div>
+        <div class="row"><span class="lbl">✅ Email</span><span class="val" id="r-confirm" style="color:#888">Vérification…</span></div>
       </div>
       <button class="btn btn-green" style="margin-top:12px" onclick="restart()">➕ Autre compte</button>
     </div>
@@ -388,12 +432,27 @@ async function finalize(code){
 
     if(finalData.account_created||finalData.user_id){
         L('🎉 COMPTE CRÉÉ ! @'+acct.uName);
+        // ── Confirmation email automatique ───────────────────────────────────
+        st('st-code','⏳ Confirmation email…','in');
+        L('📬 Confirmation email automatique…');
+        let cr = { confirmed: false };
+        try {
+            await sleep(3000);
+            cr = await (await fetch('/api/confirm-email?token='+encodeURIComponent(acct.token||''))).json();
+            if(cr.confirmed){
+                L('✅ Email confirmé ! Compte actif !');
+            } else {
+                L('⚠️ Lien confirm non trouvé ('+(cr.error||'?')+') — compte créé quand même','w');
+            }
+        } catch(e) { L('⚠️ Confirm : '+e.message,'w'); }
+        // ── Afficher succès ───────────────────────────────────────────────────
         document.getElementById('step-code').style.display='none';
         document.getElementById('step-done').style.display='block';
         document.getElementById('r-email').textContent=acct.email;
         document.getElementById('r-pass').textContent=acct.password;
         document.getElementById('r-user').textContent='@'+acct.uName;
         document.getElementById('r-name').textContent=acct.fullName;
+        document.getElementById('r-confirm').textContent= cr && cr.confirmed ? '✅ Confirmé !' : '⚠️ À confirmer manuellement';
     }else{
         const err=finalData.errors?JSON.stringify(finalData.errors).substring(0,100):JSON.stringify(finalData).substring(0,100);
         L('❌ '+err,'e');st('st-code','❌ '+err,'er');document.getElementById('btnCode').disabled=false;
