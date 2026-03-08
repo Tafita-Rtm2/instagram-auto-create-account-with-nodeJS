@@ -55,10 +55,9 @@ app.get('/api/poll-code', async (req, res) => {
 // ── Liste de proxies CORS publics rotatifs ───────────────────────────────────
 const CORS_PROXIES = [
     'https://corsproxy.io/?url=',
-    'https://api.allorigins.win/raw?url=',
     'https://proxy.cors.sh/',
-    'https://cors-anywhere.herokuapp.com/',
-    'https://thingproxy.freeboard.io/fetch/',
+    'https://corsproxy.io/?url=',   // retry corsproxy avec autre index
+    'https://proxy.cors.sh/',
 ];
 let proxyIdx = 0;
 function nextProxy() {
@@ -99,9 +98,14 @@ app.post('/api/ig', async (req, res) => {
             });
             const text = await r.text();
             slog('   → ' + r.status + ' ' + text.substring(0, 120));
-            if (r.status === 429 || (text.includes('"spam":true'))) {
+            if (r.status === 429 || text.includes('"spam":true')) {
                 errors.push('429/spam sur ' + proxy.split('/')[2]);
-                continue; // essayer prochain proxy
+                continue;
+            }
+            if (text.trimStart().startsWith('<')) {
+                errors.push('HTML reçu (POST non supporté) sur ' + proxy.split('/')[2]);
+                slog('   ⚠️ HTML reçu — proxy ne supporte pas POST');
+                continue;
             }
             try { return res.json(JSON.parse(text)); }
             catch(e) { return res.json({ error: text.substring(0, 300) }); }
@@ -603,11 +607,23 @@ async function restart() {
     document.getElementById('cap-box').classList.remove('show');
     captchaNeeded = false;
     if (typeof hcaptcha !== 'undefined') { try { hcaptcha.reset(); } catch(e) {} }
+    randomDate();
     await loadInfos();
+}
+
+// ── Date aléatoire automatique (1980-2005) ────────────────────────────────────
+function randomDate() {
+    const y = 1980 + Math.floor(Math.random() * 25);   // 1980 à 2005
+    const m = 1    + Math.floor(Math.random() * 12);   // 1 à 12
+    const d = 1    + Math.floor(Math.random() * 28);   // 1 à 28 (safe pour tous les mois)
+    document.getElementById('sM').value = m;
+    document.getElementById('sD').value = d;
+    document.getElementById('sY').value = y;
 }
 
 // ── Démarrage ──────────────────────────────────────────────────────────────────
 loadInfos();
+randomDate();
 </script>
 </body></html>`);
 });
