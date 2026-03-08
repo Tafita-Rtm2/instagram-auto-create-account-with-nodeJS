@@ -430,281 +430,184 @@ async function solveAudioCaptcha(audioUrl, cookieStr, log) {
 }
 
 // ── Gestion checkpoint Instagram ─────────────────────────────────────────────
+// Détection automatique si Puppeteer disponible (PC) sinon mode manuel (Termux)
+let puppeteerAvailable = false;
+let puppeteer = null;
+try { puppeteer = require('puppeteer'); puppeteerAvailable = true; } catch(e) {}
+
+// Stockage sessions checkpoint en attente (mode manuel)
+const checkpointSessions = {};
+
 async function handleCheckpoint(checkpointUrl, cookieStr, csrf, log) {
     try {
         const baseUrl = 'https://www.instagram.com';
         let currentUrl = checkpointUrl.startsWith('http') ? checkpointUrl : baseUrl + checkpointUrl;
         log('🔒 Checkpoint : ' + currentUrl.substring(0, 80));
 
-        const mobileUA = 'Mozilla/5.0 (Linux; Android 12; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
-
-        // ── Étape 1 : Chercher la vraie URL /challenge/ ───────────────────────
-        // Stratégie A : API checkpoint
-        log('📡 Recherche URL challenge...');
+        // Récupérer la vraie URL /challenge/
         let challengeUrl = null;
-
         try {
             const apiResp = await makeFetch('https://www.instagram.com/api/v1/challenge/', {
-                headers: { 'User-Agent': mobileUA, 'Cookie': cookieStr, 'X-CSRFToken': csrf,
+                headers: { 'User-Agent': IG_UA, 'Cookie': cookieStr, 'X-CSRFToken': csrf,
                            'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
                 timeout: 8000,
             });
             const apiData = await apiResp.json().catch(() => ({}));
             challengeUrl = apiData.challenge_url || apiData.checkpoint_url || null;
-            if (challengeUrl) log('✅ Challenge via API : ' + challengeUrl.substring(0, 60));
+            if (challengeUrl) log('✅ Challenge URL : ' + challengeUrl.substring(0, 60));
         } catch(e) {}
 
-        // Stratégie B : Charger la page suspended et chercher le lien
         if (!challengeUrl) {
             const suspResp = await makeFetch('https://www.instagram.com/accounts/suspended/?next=%2F', {
-                headers: { 'User-Agent': mobileUA, 'Cookie': cookieStr, 'Accept': 'text/html,*/*',
-                           'Accept-Language': 'fr-FR,fr;q=0.9' },
+                headers: { 'User-Agent': IG_UA, 'Cookie': cookieStr, 'Accept': 'text/html,*/*' },
                 redirect: 'follow', timeout: 12000,
             });
             cookieStr = mergeCookies(cookieStr, suspResp.headers.raw()['set-cookie']);
             const suspHtml = await suspResp.text();
             csrf = extractCsrf(suspHtml, csrf);
-
-            // Chercher /challenge/ dans le HTML
-            const patterns = [
-                /href="(\/challenge\/action\/[^"?]+[^"]*)"/,
-                /href="(https:\/\/www\.instagram\.com\/challenge\/[^"]+)"/,
-                /"challenge_url"\s*:\s*"([^"\\]+)"/,
-                /action="(\/challenge\/[^"]+)"/,
-                /src="[^"]*" data-testid[^>]*>\s*<a href="(\/challenge[^"]+)"/,
-            ];
-            for (const p of patterns) {
-                const m = suspHtml.match(p);
-                if (m) {
-                    challengeUrl = m[1].startsWith('http') ? m[1] : baseUrl + m[1];
-                    log('✅ Challenge dans HTML : ' + challengeUrl.substring(0, 60));
-                    break;
-                }
-            }
-
-            // Stratégie C : Chercher dans les données JSON embarquées
-            if (!challengeUrl) {
-                const jsonMatch = suspHtml.match(/"(\/challenge\/action\/[^"\\]+)"/);
-                if (jsonMatch) {
-                    challengeUrl = baseUrl + jsonMatch[1].replace(/\\\//g, '/');
-                    log('✅ Challenge dans JSON : ' + challengeUrl.substring(0, 60));
-                }
-            }
+            const m = suspHtml.match(/href="(\/challenge\/action\/[^"?]+)"/)
+                   || suspHtml.match(/"(\/challenge\/action\/[^"\\]+)"/)
+                   || suspHtml.match(/href="(https:\/\/www\.instagram\.com\/challenge\/[^"]+)"/);
+            if (m) challengeUrl = m[1].startsWith('http') ? m[1] : baseUrl + m[1];
         }
 
-        // Utiliser l'URL trouvée ou rester sur suspended
-        if (challengeUrl) {
-            currentUrl = challengeUrl.startsWith('http') ? challengeUrl : baseUrl + challengeUrl;
+        if (challengeUrl) currentUrl = challengeUrl.startsWith('http') ? challengeUrl : baseUrl + challengeUrl;
+
+        // ── MODE AUTO : Puppeteer (PC Windows/Linux/Mac) ──────────────────────
+        if (puppeteerAvailable) {
+            log('🤖 Mode AUTO Puppeteer...');
+            return await handleCheckpointPuppeteer(currentUrl, cookieStr, csrf, log);
         }
 
-        // ── Étape 2 : Charger la page challenge ───────────────────────────────
-        log('📄 Chargement : ' + currentUrl.substring(0, 80));
-        let resp = await makeFetch(currentUrl, {
-            headers: {
-                'User-Agent': mobileUA, 'Cookie': cookieStr,
-                'Accept': 'text/html,application/xhtml+xml,*/*',
-                'Accept-Language': 'fr-FR,fr;q=0.9',
-                'Referer': 'https://www.instagram.com/',
-            },
-            redirect: 'follow', timeout: 15000,
-        });
-        cookieStr = mergeCookies(cookieStr, resp.headers.raw()['set-cookie']);
-        let html = await resp.text();
-        csrf = extractCsrf(html, csrf);
-        currentUrl = resp.url || currentUrl;
-        log('📄 Page → ' + resp.status + ' | ' + currentUrl.substring(0, 70));
+        // ── MODE MANUEL : Intervention humaine (Termux) ───────────────────────
+        log('👤 Mode MANUEL — Ouvre cette URL dans Brave et résous le checkpoint :');
+        log('🔗 ' + currentUrl);
+        log('⏳ En attente de ta confirmation (max 3 min)...');
 
-        // ── Étape 3 : Clic "Continuer" / "Confirmer" ──────────────────────────
-        const needsContinue = /Continuer|Continue|personne r[eé]elle|real person|Confirme/i.test(html);
-        if (needsContinue) {
-            log('📄 Clic Continuer...');
-            const jazoest1 = (html.match(/name="jazoest"\s+value="([^"]+)"/) || [])[1] || '';
-            const action1 = (html.match(/<form[^>]+action="([^"]+)"/) || [])[1] || currentUrl;
-            const postUrl1 = action1.startsWith('http') ? action1 : baseUrl + action1;
+        // Stocker la session en attente
+        const sessionKey = Date.now().toString();
+        checkpointSessions[sessionKey] = { 
+            url: currentUrl, 
+            cookieStr, 
+            resolved: false, 
+            timedOut: false 
+        };
 
-            resp = await makeFetch(postUrl1, {
-                method: 'POST',
-                headers: {
-                    'User-Agent': mobileUA, 'Cookie': cookieStr,
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Referer': currentUrl, 'Origin': baseUrl, 'X-CSRFToken': csrf,
-                },
-                body: enc({ csrfmiddlewaretoken: csrf, jazoest: jazoest1, choice: '0' }),
-                redirect: 'follow', timeout: 15000,
-            });
-            cookieStr = mergeCookies(cookieStr, resp.headers.raw()['set-cookie']);
-            html = await resp.text();
-            csrf = extractCsrf(html, csrf);
-            currentUrl = resp.url || postUrl1;
-            log('📄 Après Continuer → ' + resp.status + ' | ' + currentUrl.substring(0, 70));
-        }
-
-        // ── Étape 4 : Extraire les URLs captcha ───────────────────────────────
-        let audioUrl = null;
-        let imgCaptchaUrl = null;
-
-        // Chercher dans JSON embarqué (format Instagram React)
-        const jsonBlocks = html.match(/"([^"]*(?:audio|captcha|challenge)[^"]*\.(?:mp3|wav|ogg|jpg|jpeg|png)[^"]*)"/gi) || [];
-        for (const block of jsonBlocks) {
-            const url = block.replace(/"/g, '').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-            if (!url.startsWith('http')) continue;
-            if (/\.(mp3|wav|ogg)/i.test(url) && !audioUrl) audioUrl = url;
-            if (/\.(jpg|jpeg|png)/i.test(url) && !imgCaptchaUrl) imgCaptchaUrl = url;
-        }
-
-        // Chercher lien audio "Écouter"
-        if (!audioUrl) {
-            const aPatterns = [
-                /href="([^"]*\.mp3[^"]*)"/i,
-                /"audio_url"\s*:\s*"([^"]+)"/i,
-                /href="([^"]+)"[^>]*>\s*[ÉE]couter/i,
-                /<a[^>]+href="([^"]+)"[^>]*>.*?[ÉE]couter/i,
-                /src="([^"]+\.mp3[^"]*)"/i,
-            ];
-            for (const p of aPatterns) {
-                const m = html.match(p);
-                if (m) {
-                    const u = m[1].replace(/\\u0026/g,'&').replace(/\\\//g,'/');
-                    audioUrl = u.startsWith('http') ? u : baseUrl + u;
-                    break;
-                }
+        // Attendre max 3 minutes que l'humain clique "Terminé" dans l'UI
+        for (let i = 0; i < 36; i++) {
+            await sleep(5000);
+            if (checkpointSessions[sessionKey].resolved) {
+                delete checkpointSessions[sessionKey];
+                log('✅ Checkpoint confirmé manuellement !');
+                return true;
             }
         }
-
-        // Chercher image captcha
-        if (!imgCaptchaUrl) {
-            const iPatterns = [
-                /src="(https:\/\/[^"]+\.(?:jpg|jpeg|png)(?:\?[^"]{0,100})?)"/i,
-                /"url"\s*:\s*"(https:[^"]+\.(?:jpg|jpeg|png)[^"]*)"/i,
-            ];
-            for (const p of iPatterns) {
-                const m = html.match(p);
-                if (m && !m[1].includes('static.cdn') && !m[1].includes('rsrc.php')) {
-                    imgCaptchaUrl = m[1].replace(/\\u0026/g,'&').replace(/\\\//g,'/');
-                    break;
-                }
-            }
-        }
-
-        log('🔍 Audio: ' + (audioUrl ? audioUrl.substring(0,60) : 'non trouvé'));
-        log('🔍 Image: ' + (imgCaptchaUrl ? imgCaptchaUrl.substring(0,60) : 'non trouvée'));
-
-        // ── Étape 5 : Résoudre le captcha ─────────────────────────────────────
-        let captchaCode = '';
-
-        if (audioUrl) {
-            log('🔊 Résolution audio...');
-            captchaCode = await solveAudioCaptcha(audioUrl, cookieStr, log);
-            log('🔊 Résultat audio: "' + captchaCode + '"');
-        }
-
-        if ((!captchaCode || captchaCode.length < 4) && imgCaptchaUrl) {
-            log('🖼️ Résolution image OCR...');
-            captchaCode = await ocrImage(imgCaptchaUrl, cookieStr);
-            log('🖼️ Résultat OCR: "' + captchaCode + '"');
-        }
-
-        if (!captchaCode || captchaCode.length < 4) {
-            const allUrls = (html.match(/https:\/\/[^\s"'<>]{10,80}/g) || []).slice(0,5);
-            log('⚠️ Captcha non résolu. URLs: ' + allUrls.join(' | '));
-
-            // Essai direct avec numéro de téléphone si pas de captcha
-            const hasPhone = /phone|mobile|Num[eé]ro|t[eé]l[eé]phone/i.test(html);
-            if (hasPhone) {
-                log('📱 Passage direct au téléphone...');
-                // continuer vers la partie téléphone
-            } else {
-                return false;
-            }
-        }
-
-        // ── Étape 6 : Soumettre le captcha ────────────────────────────────────
-        if (captchaCode && captchaCode.length >= 4) {
-            const jazoest2 = (html.match(/name="jazoest"\s+value="([^"]+)"/) || [])[1] || '';
-            const action2  = (html.match(/<form[^>]+action="([^"]+)"/) || [])[1] || currentUrl;
-            const postUrl2 = action2.startsWith('http') ? action2 : baseUrl + action2;
-
-            resp = await makeFetch(postUrl2, {
-                method: 'POST',
-                headers: {
-                    'User-Agent': mobileUA, 'Cookie': cookieStr,
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Referer': currentUrl, 'Origin': baseUrl, 'X-CSRFToken': csrf,
-                },
-                body: enc({ csrfmiddlewaretoken: csrf, jazoest: jazoest2, response: captchaCode }),
-                redirect: 'follow', timeout: 15000,
-            });
-            cookieStr = mergeCookies(cookieStr, resp.headers.raw()['set-cookie']);
-            html = await resp.text();
-            csrf = extractCsrf(html, csrf);
-            currentUrl = resp.url || postUrl2;
-            log('🔢 Captcha soumis → ' + resp.status);
-        }
-
-        // ── Étape 7 : Numéro de téléphone ─────────────────────────────────────
-        const hasPhone = /phone|mobile|Num[eé]ro|t[eé]l[eé]phone/i.test(html);
-        if (!hasPhone) {
-            const ok = !/suspended|challenge/i.test(html);
-            log(ok ? '✅ Checkpoint résolu sans téléphone !' : '⚠️ Page inattendue après captcha');
-            return ok;
-        }
-
-        log('📱 Numéro de téléphone requis...');
-        let phoneData;
-        try { phoneData = await getFreePhone(); }
-        catch(e) { log('⚠️ Pas de numéro : ' + e.message); return false; }
-        log('📱 Numéro : ' + phoneData.number);
-
-        const phoneAction = (html.match(/<form[^>]+action="([^"]+)"/) || [])[1] || currentUrl;
-        const phonePostUrl = phoneAction.startsWith('http') ? phoneAction : baseUrl + phoneAction;
-        const jazoestPhone = (html.match(/name="jazoest"\s+value="([^"]+)"/) || [])[1] || '';
-
-        resp = await makeFetch(phonePostUrl, {
-            method: 'POST',
-            headers: {
-                'User-Agent': mobileUA, 'Cookie': cookieStr,
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Referer': currentUrl, 'Origin': baseUrl, 'X-CSRFToken': csrf,
-            },
-            body: enc({ csrfmiddlewaretoken: csrf, jazoest: jazoestPhone, phone_number: phoneData.number }),
-            redirect: 'follow', timeout: 15000,
-        });
-        cookieStr = mergeCookies(cookieStr, resp.headers.raw()['set-cookie']);
-        html = await resp.text();
-        csrf = extractCsrf(html, csrf);
-        log('📱 Numéro envoyé → ' + resp.status);
-
-        // ── Étape 8 : Code SMS ─────────────────────────────────────────────────
-        log('⏳ Attente SMS...');
-        const smsCode = await readSmsCode(phoneData.number);
-        if (!smsCode) { log('⚠️ SMS non reçu'); return false; }
-        log('📲 SMS : ' + smsCode);
-
-        const smsAction = (html.match(/<form[^>]+action="([^"]+)"/) || [])[1] || currentUrl;
-        const smsPostUrl = smsAction.startsWith('http') ? smsAction : baseUrl + smsAction;
-        const jazoestSms = (html.match(/name="jazoest"\s+value="([^"]+)"/) || [])[1] || '';
-
-        resp = await makeFetch(smsPostUrl, {
-            method: 'POST',
-            headers: {
-                'User-Agent': mobileUA, 'Cookie': cookieStr,
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Referer': resp.url || currentUrl, 'Origin': baseUrl, 'X-CSRFToken': csrf,
-            },
-            body: enc({ csrfmiddlewaretoken: csrf, jazoest: jazoestSms, response: smsCode }),
-            redirect: 'follow', timeout: 15000,
-        });
-        cookieStr = mergeCookies(cookieStr, resp.headers.raw()['set-cookie']);
-        html = await resp.text();
-        const finalUrl = resp.url || smsPostUrl;
-        log('📲 SMS soumis → ' + resp.status + ' | ' + finalUrl.substring(0,60));
-
-        const ok = !/suspended|challenge/i.test(html) || /feed|home|explore/i.test(html);
-        log(ok ? '✅ Checkpoint résolu !' : '⚠️ Checkpoint non résolu : ' + resp.status);
-        return ok;
+        delete checkpointSessions[sessionKey];
+        log('⚠️ Timeout — checkpoint non confirmé');
+        return false;
 
     } catch(e) { log('⚠️ Checkpoint : ' + e.message); return false; }
 }
+
+// ── Puppeteer : résolution automatique ───────────────────────────────────────
+async function handleCheckpointPuppeteer(challengeUrl, cookieStr, csrf, log) {
+    let browser = null;
+    try {
+        log('🌐 Lancement Chrome...');
+        browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        });
+        const page = await browser.newPage();
+
+        // Injecter les cookies Instagram
+        const cookies = cookieStr.split(';').map(c => {
+            const [name, ...valParts] = c.trim().split('=');
+            return { name: name.trim(), value: valParts.join('=').trim(), domain: '.instagram.com', path: '/' };
+        }).filter(c => c.name && c.value);
+        await page.setCookie(...cookies);
+
+        await page.setUserAgent(IG_UA);
+        await page.setExtraHTTPHeaders({ 'Accept-Language': 'fr-FR,fr;q=0.9' });
+
+        log('📄 Navigation vers challenge...');
+        await page.goto(challengeUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        await sleep(2000);
+
+        // Clic "Continuer" si présent
+        const continueBtn = await page.$('button[type="submit"], button:contains("Continuer"), button:contains("Continue")');
+        if (continueBtn) {
+            log('📄 Clic Continuer...');
+            await continueBtn.click();
+            await sleep(2000);
+        }
+
+        // Chercher le bouton audio "Écouter ce code"
+        log('🔊 Recherche bouton audio...');
+        const audioBtn = await page.$x('//a[contains(text(), "couter") or contains(text(), "audio") or contains(@href, ".mp3")]');
+        
+        if (audioBtn.length > 0) {
+            const audioHref = await page.evaluate(el => el.href, audioBtn[0]);
+            log('🔊 Audio trouvé : ' + audioHref.substring(0, 60));
+
+            // Télécharger et transcrire l'audio
+            const audioCode = await solveAudioCaptcha(audioHref, cookieStr, log);
+            log('🔊 Code audio : "' + audioCode + '"');
+
+            if (audioCode && audioCode.length >= 4) {
+                // Entrer le code dans le champ
+                const codeInput = await page.$('input[name="response"], input[type="text"], input[placeholder*="code"]');
+                if (codeInput) {
+                    await codeInput.click({ clickCount: 3 });
+                    await codeInput.type(audioCode, { delay: 80 });
+                    await sleep(500);
+                    await page.keyboard.press('Enter');
+                    await sleep(3000);
+
+                    const finalUrl = page.url();
+                    log('📄 Après soumission → ' + finalUrl.substring(0, 60));
+                    const ok = !/suspended|challenge/i.test(finalUrl);
+                    if (ok) { log('✅ Checkpoint résolu automatiquement !'); return true; }
+                }
+            }
+        }
+
+        // Fallback : chercher image captcha OCR
+        log('🖼️ Tentative OCR image...');
+        const imgEl = await page.$('img[src*="captcha"], img[src*="challenge"]');
+        if (imgEl) {
+            const imgSrc = await page.evaluate(el => el.src, imgEl);
+            const ocrCode = await ocrImage(imgSrc, cookieStr);
+            log('🖼️ OCR : "' + ocrCode + '"');
+            if (ocrCode && ocrCode.length >= 4) {
+                const inp = await page.$('input[name="response"], input[type="text"]');
+                if (inp) {
+                    await inp.type(ocrCode, { delay: 80 });
+                    await page.keyboard.press('Enter');
+                    await sleep(3000);
+                    const ok = !/suspended|challenge/i.test(page.url());
+                    if (ok) { log('✅ Checkpoint résolu par OCR !'); return true; }
+                }
+            }
+        }
+
+        log('⚠️ Auto échoué — passage mode manuel');
+        await browser.close();
+        browser = null;
+
+        // Fallback manuel même sur PC
+        log('👤 Ouvre cette URL dans ton navigateur :');
+        log('🔗 ' + challengeUrl);
+        return false;
+
+    } catch(e) {
+        log('⚠️ Puppeteer : ' + e.message);
+        return false;
+    } finally {
+        if (browser) await browser.close().catch(() => {});
+    }
+}
+
 
 
 let mid_global = 'mid_' + Math.random().toString(36).slice(2,14);
@@ -956,7 +859,26 @@ app.get('/api/session/:id', (req, res) => {
 
 app.get('/api/tor', async (req, res) => {
     const ok = await checkTor();
-    res.json({ available: ok });
+    res.json({ available: ok, puppeteer: puppeteerAvailable });
+});
+
+// Route : confirmer checkpoint manuel
+app.post('/api/checkpoint/confirm/:key', (req, res) => {
+    const key = req.params.key;
+    if (checkpointSessions[key]) {
+        checkpointSessions[key].resolved = true;
+        res.json({ ok: true });
+    } else {
+        res.json({ ok: false, reason: 'Session inconnue ou expirée' });
+    }
+});
+
+// Route : lister checkpoints en attente
+app.get('/api/checkpoint/pending', (req, res) => {
+    const pending = Object.entries(checkpointSessions).map(([key, s]) => ({
+        key, url: s.url, resolved: s.resolved
+    }));
+    res.json({ pending });
 });
 
 // ── UI ────────────────────────────────────────────────────────────────────────
@@ -1344,6 +1266,40 @@ function exportResults() {
 }
 
 checkTor();
+setInterval(checkPendingCheckpoints, 4000);
+
+async function checkPendingCheckpoints() {
+  try {
+    var d = await fetch('/api/checkpoint/pending').then(function(r){ return r.json(); });
+    var banner = document.getElementById('checkpoint-banner');
+    var list = document.getElementById('cp-list');
+    if (!d.pending || d.pending.length === 0) {
+      banner.style.display = 'none';
+      return;
+    }
+    banner.style.display = 'block';
+    list.innerHTML = d.pending.filter(function(p){ return !p.resolved; }).map(function(p){
+      return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">' +
+        '<span style="font-size:.82rem;color:#fed7aa;flex:1;word-break:break-all">' +
+          '&#x1F517; <a href="' + p.url + '" target="_blank" style="color:#fb923c">' + p.url + '</a>' +
+        '</span>' +
+        '<button onclick="confirmCheckpoint('' + p.key + '')" style="background:#16a34a;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-weight:700;cursor:pointer;white-space:nowrap">' +
+          '&#x2705; J'ai résolu le checkpoint' +
+        '</button>' +
+      '</div>';
+    }).join('');
+  } catch(e) {}
+}
+
+async function confirmCheckpoint(key) {
+  try {
+    var r = await fetch('/api/checkpoint/confirm/' + key, { method: 'POST' }).then(function(r){ return r.json(); });
+    if (r.ok) {
+      log('\u2705 Checkpoint confirmé !');
+      checkPendingCheckpoints();
+    }
+  } catch(e) {}
+}
 </script>
 </body></html>`;
 
