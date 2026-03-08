@@ -953,243 +953,397 @@ app.get('/api/tor', async (req, res) => {
 });
 
 // ── UI ────────────────────────────────────────────────────────────────────────
-app.get('/', (req, res) => { res.send(`<!DOCTYPE html>
+const UI_HTML = `<!DOCTYPE html>
 <html lang="fr">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Bot Instagram</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:Arial,sans-serif;background:#f0f2f5;min-height:100vh}
-    .hdr{background:linear-gradient(135deg,#e1306c,#f77737);color:#fff;padding:16px;text-align:center;font-size:20px;font-weight:bold}
-    .wrap{max-width:500px;margin:0 auto;padding:14px}
-    .card{background:#fff;border-radius:14px;padding:18px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,0,0,.08)}
-    .ttl{font-size:16px;font-weight:bold;color:#333;margin-bottom:14px}
-    .btn{width:100%;padding:16px;color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:bold;cursor:pointer;margin-top:8px;transition:.2s}
-    .btn:disabled{opacity:.5;cursor:not-allowed}
-    .btn:active{transform:scale(.98)}
-    .btn-main{background:linear-gradient(135deg,#e1306c,#f77737)}
-    .btn-gray{background:linear-gradient(135deg,#6c757d,#495057);font-size:13px;padding:10px}
-    .counter{display:flex;align-items:center;justify-content:space-between;background:#f8f9fa;border-radius:12px;padding:12px 16px;margin-bottom:14px}
-    .counter-val{font-size:36px;font-weight:bold;color:#e1306c;min-width:50px;text-align:center}
-    .counter-btn{background:#e1306c;border:none;color:#fff;width:44px;height:44px;border-radius:50%;font-size:24px;cursor:pointer;display:flex;align-items:center;justify-content:center}
-    .progress-wrap{background:#f0f0f0;border-radius:10px;height:12px;margin:10px 0;overflow:hidden}
-    .progress-bar{height:100%;background:linear-gradient(135deg,#e1306c,#f77737);border-radius:10px;transition:width .5s;width:0%}
-    .status-row{display:flex;justify-content:space-between;font-size:13px;color:#666;margin-bottom:8px}
-    .accounts-list{display:flex;flex-direction:column;gap:10px;margin-top:10px}
-    .acc-card{border-radius:10px;padding:12px;border:2px solid}
-    .acc-ok{border-color:#86efac;background:#f0fdf4}
-    .acc-err{border-color:#fca5a5;background:#fef2f2}
-    .acc-row{display:flex;gap:8px;font-size:12px;padding:2px 0}
-    .acc-lbl{color:#888;width:65px;flex-shrink:0}
-    .acc-val{color:#222;font-weight:600;word-break:break-all}
-    .badge{display:inline-block;border-radius:20px;padding:1px 8px;font-size:10px;font-weight:bold;margin-left:4px}
-    .b-ok{background:#dcfce7;color:#166534}
-    .b-warn{background:#fef9c3;color:#854d0e}
-    .logs{background:#0f172a;border-radius:10px;padding:10px;max-height:250px;overflow-y:auto;margin-top:10px}
-    .ll{font-family:monospace;font-size:11px;padding:2px 0;border-bottom:1px solid #1e293b;color:#34d399}
-    .ll.e{color:#f87171}.ll.w{color:#fbbf24}.ll.i{color:#60a5fa}
-    .tor-badge{font-size:11px;padding:4px 10px;border-radius:20px;display:inline-block;margin-top:6px}
-    .tor-on{background:#dcfce7;color:#166534}
-    .tor-off{background:#fef9c3;color:#854d0e}
-    .copy-btn{background:none;border:1px solid #ddd;border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer;margin-left:4px;color:#666}
-    .export-btn{background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;margin-top:10px;width:100%}
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Instagram Bot — Live</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0a12; color: #e2e8f0; min-height: 100vh; }
+
+/* TOPBAR */
+.topbar {
+  background: linear-gradient(135deg, #e1306c, #f77737);
+  padding: 0 20px; height: 56px;
+  display: flex; align-items: center; justify-content: space-between;
+  position: sticky; top: 0; z-index: 100;
+  box-shadow: 0 2px 20px rgba(225,48,108,.4);
+}
+.topbar h1 { font-size: 1.05rem; font-weight: 800; color: #fff; letter-spacing: .5px; }
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+#ip-badge { font-size: .75rem; background: rgba(255,255,255,.15); color: #fff; padding: 4px 10px; border-radius: 20px; }
+
+/* LAYOUT */
+.layout { display: grid; grid-template-columns: 320px 1fr; gap: 0; min-height: calc(100vh - 56px); }
+
+/* LEFT PANEL */
+.left { background: #10101c; border-right: 1px solid #1e1e30; padding: 16px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; max-height: calc(100vh - 56px); }
+
+/* CONFIG CARD */
+.config-card { background: #16162a; border: 1px solid #2a2a40; border-radius: 14px; padding: 16px; }
+.card-title { font-size: .8rem; font-weight: 700; color: #818cf8; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 14px; }
+.count-ctrl { display: flex; align-items: center; justify-content: center; gap: 0; background: #0d0d1a; border-radius: 12px; padding: 8px; margin-bottom: 14px; }
+.count-btn { background: linear-gradient(135deg,#e1306c,#f77737); border: none; color: #fff; width: 40px; height: 40px; border-radius: 10px; font-size: 1.3rem; cursor: pointer; font-weight: 700; transition: .15s; }
+.count-btn:hover { opacity: .85; }
+.count-val { font-size: 2.2rem; font-weight: 900; color: #fff; min-width: 70px; text-align: center; }
+.count-lbl { font-size: .72rem; color: #64748b; text-align: center; margin-top: 2px; }
+.btn-launch { width: 100%; padding: 14px; background: linear-gradient(135deg, #e1306c, #f77737); color: #fff; border: none; border-radius: 12px; font-size: 1rem; font-weight: 800; cursor: pointer; transition: .2s; box-shadow: 0 4px 20px rgba(225,48,108,.35); letter-spacing: .5px; }
+.btn-launch:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(225,48,108,.5); }
+.btn-launch:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+
+/* PROGRESS */
+.prog-card { background: #16162a; border: 1px solid #2a2a40; border-radius: 14px; padding: 16px; display: none; }
+.pbar-track { background: #0d0d1a; border-radius: 10px; height: 10px; margin: 10px 0; overflow: hidden; }
+.pbar-fill { height: 100%; background: linear-gradient(90deg, #e1306c, #f77737); border-radius: 10px; transition: width .6s ease; width: 0%; }
+.stats-row { display: flex; justify-content: space-between; font-size: .8rem; margin-top: 8px; }
+.stat-item { text-align: center; }
+.stat-num { font-size: 1.2rem; font-weight: 700; }
+.stat-ok { color: #34d399; }
+.stat-fail { color: #f87171; }
+.stat-left { color: #fbbf24; }
+.stat-lbl { font-size: .7rem; color: #64748b; margin-top: 1px; }
+.btn-export { width: 100%; margin-top: 12px; padding: 10px; background: #1e293b; color: #818cf8; border: 1px solid #334155; border-radius: 10px; font-size: .85rem; cursor: pointer; font-weight: 600; display: none; }
+.btn-export:hover { background: #263248; }
+
+/* LOGS */
+.logs-card { background: #16162a; border: 1px solid #2a2a40; border-radius: 14px; padding: 14px; flex: 1; min-height: 200px; }
+.logs-box { background: #080812; border-radius: 8px; padding: 10px; height: 220px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: .75rem; }
+.log-line { padding: 2px 0; border-bottom: 1px solid #0d0d1a; white-space: pre-wrap; word-break: break-all; }
+.log-ok  { color: #34d399; }
+.log-err { color: #f87171; }
+.log-warn{ color: #fbbf24; }
+.log-info{ color: #60a5fa; }
+.log-def { color: #94a3b8; }
+
+/* RIGHT PANEL — LIVE ACCOUNTS */
+.right { padding: 16px; overflow-y: auto; max-height: calc(100vh - 56px); }
+.right-title { font-size: .8rem; font-weight: 700; color: #818cf8; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+.live-dot { width: 8px; height: 8px; background: #34d399; border-radius: 50%; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(1.3)} }
+
+.accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+
+/* ACCOUNT CARD */
+.acc-card { background: #16162a; border: 2px solid #2a2a40; border-radius: 14px; padding: 14px; transition: .3s; animation: slideIn .3s ease; }
+@keyframes slideIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+.acc-card.success { border-color: #065f46; background: #0d1f18; }
+.acc-card.error   { border-color: #7f1d1d; background: #1a0f0f; }
+.acc-card.running { border-color: #1e3a5f; background: #0d1829; }
+
+.acc-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.acc-num { font-size: .75rem; font-weight: 700; color: #64748b; }
+.acc-status { display: flex; align-items: center; gap: 6px; font-size: .78rem; font-weight: 700; }
+.acc-status.ok   { color: #34d399; }
+.acc-status.err  { color: #f87171; }
+.acc-status.run  { color: #60a5fa; }
+
+.acc-avatar { width: 44px; height: 44px; border-radius: 50%; background: linear-gradient(135deg,#e1306c,#f77737); display: flex; align-items: center; justify-content: center; font-size: 1.2rem; margin: 0 auto 10px; border: 2px solid #2a2a40; overflow: hidden; }
+.acc-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+
+.acc-username { font-size: .95rem; font-weight: 800; color: #fff; text-align: center; margin-bottom: 4px; }
+.acc-name     { font-size: .78rem; color: #64748b; text-align: center; margin-bottom: 12px; }
+
+.acc-fields { display: flex; flex-direction: column; gap: 6px; }
+.acc-field { display: flex; justify-content: space-between; align-items: center; background: #0d0d1a; border-radius: 8px; padding: 6px 10px; }
+.acc-field-lbl { font-size: .72rem; color: #64748b; }
+.acc-field-val { font-size: .78rem; font-weight: 600; color: #e2e8f0; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copy-btn { background: #1e293b; border: none; color: #818cf8; border-radius: 5px; padding: 2px 7px; font-size: .68rem; cursor: pointer; margin-left: 4px; white-space: nowrap; }
+.copy-btn:hover { background: #263248; }
+
+.acc-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: .68rem; font-weight: 700; }
+.b-active  { background: #064e3b; color: #34d399; }
+.b-suspend { background: #451a03; color: #fbbf24; }
+.b-photo   { background: #1e1b4b; color: #818cf8; }
+.b-login   { background: #0c1a3a; color: #60a5fa; }
+.b-email   { background: #1a0533; color: #c084fc; }
+
+/* ACC CARD LOADING SKELETON */
+.acc-card.skeleton { border-color: #1e2a3a; }
+.skel { background: linear-gradient(90deg, #1a1a2e 25%, #252545 50%, #1a1a2e 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 6px; }
+@keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+
+.empty-state { text-align: center; padding: 60px 20px; color: #334155; }
+.empty-state .ico { font-size: 3rem; margin-bottom: 12px; }
+.empty-state p { font-size: .9rem; }
+
+/* RESPONSIVE */
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .left { max-height: none; border-right: none; border-bottom: 1px solid #1e1e30; }
+  .logs-box { height: 160px; }
+  .right { max-height: none; }
+}
+@media (max-width: 480px) {
+  .accounts-grid { grid-template-columns: 1fr; }
+  .topbar h1 { font-size: .9rem; }
+}
+</style>
 </head>
 <body>
-<div class="hdr">🤖 Bot Instagram</div>
-<div class="wrap">
 
-  <div class="card">
-    <div class="ttl">⚙️ Configuration</div>
-    <div id="tor-status"><span class="tor-badge tor-off">⏳ Vérification Tor…</span></div>
-    <div style="margin-top:16px">
-      <div style="font-size:14px;color:#555;margin-bottom:10px;text-align:center">Nombre de comptes à créer</div>
-      <div class="counter">
-        <button class="counter-btn" onclick="changeCount(-1)">−</button>
-        <div>
-          <div class="counter-val" id="countVal">1</div>
-          <div style="font-size:11px;color:#999;text-align:center">comptes</div>
+<div class="topbar">
+  <h1>🤖 Instagram Bot — Live Creator</h1>
+  <div class="topbar-right">
+    <span id="ip-badge">⏳ Vérification…</span>
+  </div>
+</div>
+
+<div class="layout">
+
+  <!-- ── GAUCHE : Contrôles ── -->
+  <div class="left">
+
+    <!-- Config -->
+    <div class="config-card">
+      <div class="card-title">⚙️ Configuration</div>
+      <div style="margin-bottom:14px">
+        <div style="font-size:.82rem;color:#64748b;text-align:center;margin-bottom:10px">Nombre de comptes</div>
+        <div class="count-ctrl">
+          <button class="count-btn" onclick="chg(-1)">−</button>
+          <div>
+            <div class="count-val" id="count-val">1</div>
+            <div class="count-lbl">comptes</div>
+          </div>
+          <button class="count-btn" onclick="chg(+1)">+</button>
         </div>
-        <button class="counter-btn" onclick="changeCount(+1)">+</button>
+      </div>
+      <button class="btn-launch" id="btn-launch" onclick="startBulk()">🚀 Lancer la création</button>
+    </div>
+
+    <!-- Progression -->
+    <div class="prog-card" id="prog-card">
+      <div class="card-title">📊 Progression <span id="prog-txt" style="font-weight:400;text-transform:none;letter-spacing:0;color:#94a3b8"></span></div>
+      <div class="pbar-track"><div class="pbar-fill" id="pbar"></div></div>
+      <div class="stats-row">
+        <div class="stat-item"><div class="stat-num stat-ok" id="cnt-ok">0</div><div class="stat-lbl">✅ Réussis</div></div>
+        <div class="stat-item"><div class="stat-num stat-fail" id="cnt-fail">0</div><div class="stat-lbl">❌ Échoués</div></div>
+        <div class="stat-item"><div class="stat-num stat-left" id="cnt-left">0</div><div class="stat-lbl">⏳ Restants</div></div>
+      </div>
+      <button class="btn-export" id="btn-export" onclick="exportResults()">📋 Exporter les comptes (.txt)</button>
+    </div>
+
+    <!-- Logs -->
+    <div class="logs-card">
+      <div class="card-title">📋 Logs en temps réel</div>
+      <div class="logs-box" id="logs-box"></div>
+    </div>
+
+  </div>
+
+  <!-- ── DROITE : Comptes live ── -->
+  <div class="right">
+    <div class="right-title">
+      <div class="live-dot" id="live-dot" style="display:none"></div>
+      🎉 Comptes créés
+    </div>
+    <div class="accounts-grid" id="accounts-grid">
+      <div class="empty-state">
+        <div class="ico">🤖</div>
+        <p>Lance la création pour voir les comptes apparaître ici en temps réel</p>
       </div>
     </div>
-    <button class="btn btn-main" id="btnStart" onclick="startBulk()">🚀 Lancer la création</button>
-  </div>
-
-  <div class="card" id="progress-card" style="display:none">
-    <div class="ttl">📊 Progression <span id="prog-text" style="font-weight:normal;font-size:13px;color:#666"></span></div>
-    <div class="progress-wrap"><div class="progress-bar" id="prog-bar"></div></div>
-    <div class="status-row">
-      <span>✅ Réussis : <strong id="cnt-ok">0</strong></span>
-      <span>❌ Échoués : <strong id="cnt-fail">0</strong></span>
-      <span>⏳ Restants : <strong id="cnt-left">0</strong></span>
-    </div>
-    <button class="export-btn" id="btnExport" onclick="exportResults()" style="display:none">📋 Exporter les comptes</button>
-  </div>
-
-  <div class="card" id="results-card" style="display:none">
-    <div class="ttl">🎉 Comptes créés</div>
-    <div class="accounts-list" id="accounts-list"></div>
-  </div>
-
-  <div class="card">
-    <div class="ttl" style="margin-bottom:6px">📋 Logs en temps réel</div>
-    <div class="logs" id="logs"></div>
   </div>
 
 </div>
-<script>
-let count = 1;
-let sessionId = null;
-let pollInterval = null;
-let allAccounts = [];
 
-function changeCount(delta) {
-    count = Math.max(1, Math.min(10, count + delta));
-    document.getElementById('countVal').textContent = count;
+<script>
+var count = 1;
+var sessionId = null;
+var pollTimer = null;
+var lastLog = 0;
+var allAccounts = [];
+var renderedIds = {};
+
+function chg(d) {
+  count = Math.max(1, Math.min(10, count + d));
+  document.getElementById('count-val').textContent = count;
 }
 
-function L(msg, t) {
-    const el = document.getElementById('logs'), d = document.createElement('div');
-    d.className = 'll' + (t ? ' ' + t : '');
-    d.textContent = new Date().toLocaleTimeString('fr') + '  ' + msg;
-    el.insertBefore(d, el.firstChild);
-    while (el.children.length > 100) el.removeChild(el.lastChild);
+function log(msg, type) {
+  var box = document.getElementById('logs-box');
+  var cls = 'log-def';
+  if (msg.includes('✅') || msg.includes('🎉')) cls = 'log-ok';
+  else if (msg.includes('❌')) cls = 'log-err';
+  else if (msg.includes('⚠️')) cls = 'log-warn';
+  else if (msg.includes('📡') || msg.includes('📬') || msg.includes('🚀')) cls = 'log-info';
+  var d = document.createElement('div');
+  d.className = 'log-line ' + cls;
+  var t = new Date().toLocaleTimeString('fr');
+  d.textContent = t + '  ' + msg;
+  box.insertBefore(d, box.firstChild);
+  while (box.children.length > 150) box.removeChild(box.lastChild);
 }
 
 async function checkTor() {
-    try {
-        const d = await (await fetch('/api/tor')).json();
-        const el = document.getElementById('tor-status');
-        if (d.available) {
-            el.innerHTML = '<span class="tor-badge tor-on">🧅 Tor actif — IP différente par compte</span>';
-        } else {
-            el.innerHTML = '<span class="tor-badge tor-off">📶 IP mobile directe (Tor non actif)</span>';
-        }
-    } catch(e) {}
+  try {
+    var d = await fetch('/api/tor').then(r => r.json());
+    var el = document.getElementById('ip-badge');
+    el.textContent = d.available ? '🧅 Tor actif' : '📶 IP mobile directe';
+    el.style.background = d.available ? 'rgba(16,185,129,.25)' : 'rgba(255,255,255,.12)';
+  } catch(e) {}
 }
 
 async function startBulk() {
-    if (count < 1) return;
-    document.getElementById('btnStart').disabled = true;
-    document.getElementById('progress-card').style.display = 'block';
-    document.getElementById('results-card').style.display = 'none';
-    document.getElementById('accounts-list').innerHTML = '';
-    document.getElementById('btnExport').style.display = 'none';
-    document.getElementById('cnt-ok').textContent = '0';
-    document.getElementById('cnt-fail').textContent = '0';
-    document.getElementById('cnt-left').textContent = count;
-    document.getElementById('prog-bar').style.width = '0%';
-    document.getElementById('prog-text').textContent = '0/' + count;
-    document.getElementById('logs').innerHTML = '';
-    allAccounts = [];
-    L('🚀 Lancement de ' + count + ' création(s)…', 'i');
+  document.getElementById('btn-launch').disabled = true;
+  document.getElementById('prog-card').style.display = 'block';
+  document.getElementById('btn-export').style.display = 'none';
+  document.getElementById('accounts-grid').innerHTML = '';
+  document.getElementById('live-dot').style.display = 'block';
+  document.getElementById('logs-box').innerHTML = '';
+  document.getElementById('cnt-ok').textContent = '0';
+  document.getElementById('cnt-fail').textContent = '0';
+  document.getElementById('cnt-left').textContent = count;
+  document.getElementById('pbar').style.width = '0%';
+  document.getElementById('prog-txt').textContent = '0/' + count;
+  allAccounts = [];
+  renderedIds = {};
+  lastLog = 0;
 
-    const resp = await fetch('/api/create-bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count })
-    });
-    const data = await resp.json();
-    sessionId = data.sessionId;
-    pollInterval = setInterval(pollSession, 2000);
+  // Afficher les cartes skeleton en attente
+  for (var i = 1; i <= count; i++) renderSkeleton(i);
+
+  log('🚀 Lancement de ' + count + ' création(s)…');
+
+  var resp = await fetch('/api/create-bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ count: count })
+  });
+  var data = await resp.json();
+  sessionId = data.sessionId;
+  pollTimer = setInterval(pollSession, 1500);
 }
 
-let lastLogCount = 0;
-async function pollSession() {
-    if (!sessionId) return;
-    try {
-        const d = await (await fetch('/api/session/' + sessionId)).json();
-
-        // Nouveaux logs
-        const newLogs = d.logs.slice(lastLogCount);
-        newLogs.forEach(msg => {
-            const t = msg.includes('❌') ? 'e' : msg.includes('⚠️') ? 'w' : msg.includes('🎉') || msg.includes('✅') ? '' : 'i';
-            L(msg, t);
-        });
-        lastLogCount = d.logs.length;
-
-        // Progression
-        const pct = Math.round((d.done / d.total) * 100);
-        document.getElementById('prog-bar').style.width = pct + '%';
-        document.getElementById('prog-text').textContent = d.done + '/' + d.total;
-        document.getElementById('cnt-left').textContent = d.total - d.done;
-
-        const ok = d.accounts.filter(a => a.success).length;
-        const fail = d.accounts.filter(a => !a.success).length;
-        document.getElementById('cnt-ok').textContent = ok;
-        document.getElementById('cnt-fail').textContent = fail;
-
-        // Afficher comptes
-        if (d.accounts.length > allAccounts.length) {
-            const newAccs = d.accounts.slice(allAccounts.length);
-            newAccs.forEach(acc => renderAccount(acc));
-            allAccounts = d.accounts;
-            document.getElementById('results-card').style.display = 'block';
-        }
-
-        if (!d.running) {
-            clearInterval(pollInterval);
-            document.getElementById('btnStart').disabled = false;
-            document.getElementById('btnExport').style.display = 'block';
-            L('✅ Terminé ! ' + ok + '/' + d.total + ' comptes créés avec succès.', '');
-        }
-    } catch(e) {}
+function renderSkeleton(i) {
+  var grid = document.getElementById('accounts-grid');
+  var el = document.createElement('div');
+  el.className = 'acc-card skeleton running';
+  el.id = 'acc-' + i;
+  el.innerHTML =
+    '<div class="acc-header">' +
+      '<span class="acc-num">Compte #' + i + '</span>' +
+      '<span class="acc-status run">⏳ En cours…</span>' +
+    '</div>' +
+    '<div class="acc-avatar">⏳</div>' +
+    '<div class="skel" style="height:14px;width:70%;margin:8px auto"></div>' +
+    '<div class="skel" style="height:10px;width:50%;margin:4px auto 12px"></div>' +
+    '<div class="skel" style="height:32px;margin-bottom:6px"></div>' +
+    '<div class="skel" style="height:32px;margin-bottom:6px"></div>' +
+    '<div class="skel" style="height:32px"></div>';
+  grid.appendChild(el);
 }
 
 function renderAccount(acc) {
-    const list = document.getElementById('accounts-list');
-    const div = document.createElement('div');
-    div.className = 'acc-card ' + (acc.success ? 'acc-ok' : 'acc-err');
-    if (acc.success) {
-        div.innerHTML = \`
-            <div style="font-weight:bold;color:#16a34a;margin-bottom:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
-                ✅ Compte #\${acc.index}
-                \${acc.checkpointResolved === true ? '<span class="badge b-ok">Actif ✓</span>' : '<span class="badge b-warn">Suspendu?</span>'}
-                \${acc.photo ? '<span class="badge b-ok">Photo ✓</span>' : ''}
-                \${acc.loggedIn ? '<span class="badge" style="background:#dbeafe;color:#1d4ed8">🔑 Connecté</span>' : ''}
-                <span class="badge" style="background:#f3e8ff;color:#7c3aed">\${acc.emailService || 'email'}</span>
-            </div>
-            <div class="acc-row"><span class="acc-lbl">📧 Email</span><span class="acc-val">\${acc.email}<button class="copy-btn" onclick="copy('\${acc.email}')">Copier</button></span></div>
-            <div class="acc-row"><span class="acc-lbl">🔒 Pass</span><span class="acc-val">\${acc.password}<button class="copy-btn" onclick="copy('\${acc.password}')">Copier</button></span></div>
-            <div class="acc-row"><span class="acc-lbl">👤 User</span><span class="acc-val">@\${acc.uName}<button class="copy-btn" onclick="copy('\${acc.uName}')">Copier</button></span></div>
-            <div class="acc-row"><span class="acc-lbl">🏷️ Nom</span><span class="acc-val">\${acc.fullName}</span></div>
-            \${acc.sessionCookies ? \`<div class="acc-row"><span class="acc-lbl">🍪 Cookies</span><span class="acc-val" style="font-size:10px;max-height:40px;overflow:hidden">\${acc.sessionCookies.substring(0,80)}…<button class="copy-btn" onclick="copy('\${acc.sessionCookies.replace(/'/g,'\\\\\'')}")">Copier</button></span></div>\` : ''}
-        \`;
-    } else {
-        div.innerHTML = \`
-            <div style="font-weight:bold;color:#dc2626;margin-bottom:4px">❌ Compte #\${acc.index} — Échec</div>
-            <div style="font-size:12px;color:#666">\${acc.error || 'Erreur inconnue'}</div>
-        \`;
-    }
-    list.appendChild(div);
+  var el = document.getElementById('acc-' + acc.index);
+  if (!el) { el = document.createElement('div'); el.id = 'acc-' + acc.index; document.getElementById('accounts-grid').appendChild(el); }
+
+  if (acc.success) {
+    el.className = 'acc-card success';
+    var avatarHtml = acc.uName
+      ? '<img src="https://ui-avatars.com/api/?name=' + encodeURIComponent(acc.fullName || acc.uName) + '&background=e1306c&color=fff&size=64" />'
+      : '👤';
+
+    var badges =
+      (acc.checkpointResolved ? '<span class="badge b-active">✅ Actif</span>' : '<span class="badge b-suspend">⚠️ Vérifié?</span>') +
+      (acc.photo   ? '<span class="badge b-photo">📷 Photo</span>' : '') +
+      (acc.loggedIn? '<span class="badge b-login">🔑 Connecté</span>' : '') +
+      '<span class="badge b-email">' + (acc.emailService || 'email') + '</span>';
+
+    el.innerHTML =
+      '<div class="acc-header">' +
+        '<span class="acc-num">Compte #' + acc.index + '</span>' +
+        '<span class="acc-status ok">✅ Créé</span>' +
+      '</div>' +
+      '<div class="acc-avatar">' + avatarHtml + '</div>' +
+      '<div class="acc-username">@' + (acc.uName || '') + '</div>' +
+      '<div class="acc-name">' + (acc.fullName || '') + '</div>' +
+      '<div class="acc-fields">' +
+        '<div class="acc-field"><span class="acc-field-lbl">📧 Email</span><span class="acc-field-val">' + (acc.email || '') + '</span><button class="copy-btn" onclick="cp(\'' + (acc.email || '').replace(/'/g,"\\'") + '\')">Copier</button></div>' +
+        '<div class="acc-field"><span class="acc-field-lbl">🔒 Mdp</span><span class="acc-field-val">' + (acc.password || '') + '</span><button class="copy-btn" onclick="cp(\'' + (acc.password || '').replace(/'/g,"\\'") + '\')">Copier</button></div>' +
+        '<div class="acc-field"><span class="acc-field-lbl">👤 User</span><span class="acc-field-val">@' + (acc.uName || '') + '</span><button class="copy-btn" onclick="cp(\'' + (acc.uName || '').replace(/'/g,"\\'") + '\')">Copier</button></div>' +
+      '</div>' +
+      '<div class="acc-badges">' + badges + '</div>';
+  } else {
+    el.className = 'acc-card error';
+    el.innerHTML =
+      '<div class="acc-header">' +
+        '<span class="acc-num">Compte #' + acc.index + '</span>' +
+        '<span class="acc-status err">❌ Échec</span>' +
+      '</div>' +
+      '<div class="acc-avatar">❌</div>' +
+      '<div style="font-size:.82rem;color:#f87171;text-align:center;margin-top:8px;padding:0 4px">' + (acc.error || 'Erreur inconnue') + '</div>';
+  }
 }
 
-function copy(text) {
-    navigator.clipboard.writeText(text).catch(() => {
-        const t = document.createElement('textarea');
-        t.value = text; document.body.appendChild(t); t.select();
-        document.execCommand('copy'); document.body.removeChild(t);
+async function pollSession() {
+  if (!sessionId) return;
+  try {
+    var d = await fetch('/api/session/' + sessionId).then(r => r.json());
+
+    // Nouveaux logs
+    var newLogs = d.logs.slice(lastLog);
+    newLogs.forEach(function(m) { log(m); });
+    lastLog = d.logs.length;
+
+    // Progression
+    var pct = d.total > 0 ? Math.round(d.done / d.total * 100) : 0;
+    document.getElementById('pbar').style.width = pct + '%';
+    document.getElementById('prog-txt').textContent = d.done + '/' + d.total;
+    document.getElementById('cnt-left').textContent = d.total - d.done;
+
+    var ok   = d.accounts.filter(function(a){ return a.success; }).length;
+    var fail = d.accounts.filter(function(a){ return !a.success; }).length;
+    document.getElementById('cnt-ok').textContent   = ok;
+    document.getElementById('cnt-fail').textContent = fail;
+
+    // Render nouveaux comptes
+    d.accounts.forEach(function(acc) {
+      if (!renderedIds[acc.index]) {
+        renderAccount(acc);
+        renderedIds[acc.index] = true;
+        allAccounts = d.accounts;
+      }
     });
+
+    if (!d.running) {
+      clearInterval(pollTimer);
+      document.getElementById('btn-launch').disabled = false;
+      document.getElementById('live-dot').style.display = 'none';
+      document.getElementById('btn-export').style.display = ok > 0 ? 'block' : 'none';
+      log('✅ Terminé ! ' + ok + '/' + d.total + ' comptes créés.');
+    }
+  } catch(e) {}
+}
+
+function cp(txt) {
+  if (navigator.clipboard) { navigator.clipboard.writeText(txt).catch(function(){}); return; }
+  var t = document.createElement('textarea');
+  t.value = txt; document.body.appendChild(t); t.select();
+  document.execCommand('copy'); document.body.removeChild(t);
 }
 
 function exportResults() {
-    const lines = allAccounts.filter(a => a.success).map(a =>
-        'Email: ' + a.email + ' | Pass: ' + a.password + ' | User: @' + a.uName + ' | Nom: ' + a.fullName
-    );
-    const blob = new Blob([lines.join('\\n')], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'comptes_instagram_' + Date.now() + '.txt';
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  var lines = allAccounts.filter(function(a){ return a.success; }).map(function(a){
+    return 'User: @' + a.uName + ' | Email: ' + a.email + ' | Pass: ' + a.password + ' | Nom: ' + a.fullName + ' | Service: ' + (a.emailService||'?');
+  });
+  var blob = new Blob([lines.join('\\n')], { type: 'text/plain' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = 'comptes_' + Date.now() + '.txt';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }
 
-// Démarrage
 checkTor();
 </script>
-</body></html>`);});
+</body></html>`;
+
+app.get('/', (req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(UI_HTML);
+});
 
 app.listen(PORT, '0.0.0.0', () => slog('🌐 Port ' + PORT));
 (async () => {
