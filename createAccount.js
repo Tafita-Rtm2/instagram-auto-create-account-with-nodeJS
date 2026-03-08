@@ -240,7 +240,7 @@ app.get('/', (req, res) => {
         <div style="font-weight:bold;color:#92400e;margin-bottom:6px">🔒 Vérification requise</div>
         <div style="font-size:12px;color:#666;margin-bottom:8px">Instagram demande une vérification. Résous le captcha puis clique sur Créer.</div>
         <div class="hcap-wrap">
-          <div class="h-captcha" data-sitekey="4c672d35-0701-42b2-88c3-78380b0db560" id="hcap"></div>
+          <div class="h-captcha" data-sitekey="13257c65-6cb7-4d3e-a1e0-f4a30e64b80c" id="hcap"></div>
         </div>
       </div>
 
@@ -414,21 +414,29 @@ async function createAccount() {
     // Récupérer le token captcha si résolu
     let captchaToken = '';
     if (captchaNeeded) {
+        // hCaptcha place le token dans h-captcha-response ET g-recaptcha-response
         try {
             const ta = document.querySelector('textarea[name="h-captcha-response"]');
             captchaToken = ta ? ta.value : '';
         } catch(e) {}
+        // Fallback : lire via l'API hcaptcha
+        if (!captchaToken && typeof hcaptcha !== 'undefined') {
+            try { captchaToken = hcaptcha.getResponse(); } catch(e) {}
+        }
         if (!captchaToken) {
             st('st-create', '⚠️ Résous le captcha d\\'abord !', 'wa');
             document.getElementById('btnCreate').disabled = false;
             return;
         }
-        L('🔒 Captcha token : ' + captchaToken.substring(0, 20) + '…');
+        L('🔒 Captcha token : ' + captchaToken.substring(0, 30) + '…');
     }
 
     const verBody = enc(Object.assign(
         { device_id: mid, email: acct.email },
-        captchaToken ? { captcha_token: captchaToken } : {}
+        captchaToken ? {
+            captcha_token       : captchaToken,
+            'g-recaptcha-response': captchaToken,
+        } : {}
     ));
 
     const verData = await ig(
@@ -447,7 +455,7 @@ async function createAccount() {
         capBox.classList.add('show');
         // Render le widget si pas encore chargé
         if (typeof hcaptcha !== 'undefined') {
-            try { hcaptcha.render('hcap', { sitekey: '4c672d35-0701-42b2-88c3-78380b0db560' }); } catch(e) {}
+            try { hcaptcha.render('hcap', { sitekey: '13257c65-6cb7-4d3e-a1e0-f4a30e64b80c' }); } catch(e) {}
         }
         document.getElementById('btnCreate').disabled = false;
         return;
